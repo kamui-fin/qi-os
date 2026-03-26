@@ -6,28 +6,65 @@
 #![test_runner(xiangqios::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use core::panic::PanicInfo;
-use xiangqios::println;
+extern crate alloc;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+use alloc::boxed::Box;
+use bootloader::{BootInfo, entry_point};
+use core::panic::PanicInfo;
+use x86_64::VirtAddr;
+use x86_64::structures::paging::{Page, PageTable, Translate};
+use xiangqios::task::Task;
+use xiangqios::task::executor::Executor;
+use xiangqios::task::keyboard::print_keypresses;
+use xiangqios::{allocator, memory, println, serial_println};
+
+entry_point!(kernel_main);
+
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("Hello World{}", "!");
 
     xiangqios::init();
 
-    // x86_64::instructions::interrupts::int3();
-    
-    use x86_64::registers::control::Cr3;
+    boot_info.memory_map.iter().for_each(|region| {
+        println!("{:?}", region);
+    });
 
-    let (level_4_page_table, _) = Cr3::read();
-    println!("Level 4 page table at: {:?}", level_4_page_table.start_address());
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    // new: initialize a mapper
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
 
-    /* fn stack_overflow() {
-        stack_overflow(); // for each recursion, the return address is pushed
+    let addresses = [
+        // the identity-mapped vga buffer page
+        0xb8000,
+        // some code page
+        0x201008,
+        // some stack page
+        0x0100_0020_1a10,
+        // virtual address mapped to physical address 0
+        boot_info.physical_memory_offset,
+    ];
+
+    for &address in &addresses {
+        let virt = VirtAddr::new(address);
+        // new: use the `mapper.translate_addr` method
+        let phys = mapper.translate_addr(virt);
+        println!("{:?} -> {:?}", virt, phys);
     }
 
-    // trigger a stack overflow
-    stack_overflow(); */
+    let mut frame_allocator =
+        unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+
+    let x = Box::new(41);
+    let y = Box::new(50);
+    println!("x = {:?}", x);
+    println!("y = {:?}", y);
+
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(example_task()));
+    executor.spawn(Task::new(print_keypresses()));
+    executor.run();
 
     #[cfg(test)]
     test_main();
@@ -44,8 +81,11 @@ fn panic(info: &PanicInfo) -> ! {
     xiangqios::hlt_loop();
 }
 
-#[cfg(test)]
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    xiangqios::test_panic_handler(info)
+async fn async_number() -> u32 {
+    42
+}
+
+async fn example_task() {
+    let number = async_number().await;
+    println!("async number: {}", number);
 }
