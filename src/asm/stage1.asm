@@ -29,6 +29,7 @@ start:
     call print
     
     .load_disk_stage_2:
+        mov dl, [boot_drive]
         mov si, STAGE2_DAP
         mov ah, 0x42
         int 0x13
@@ -59,7 +60,8 @@ print:
         ret
 
 
-STAGE2_SECTORS equ (stage2_end - stage2_start) / 512
+; Safe sector rounding formula
+STAGE2_SECTORS equ ((stage2_end - stage2_start + 511) / 512)
     
 align 4
 STAGE2_DAP:
