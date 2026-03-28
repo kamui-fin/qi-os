@@ -25,7 +25,105 @@ stage2_entrypoint:
     jz .error_a20
     mov si, msg_a20_ok
     call print
+    
+   .load_disk_rust_kernel:
+        ; === 1. UNREAL MODE SETUP ===
+        cli
+        push ds                 ; Save original DS
+        lgdt [gdt_descriptor_unreal]
+        
+        mov eax, cr0
+        or al, 1
+        mov cr0, eax            ; Protected Mode ON
+        
+        mov bx, 0x08            ; 4GB Data Selector
+        mov ds, bx              ; Load "Big" limit into DS
+        mov es, bx              ; Load "Big" limit into ES
+        
+        mov eax, cr0
+        and al, 0xFE
+        mov cr0, eax            ; Protected Mode OFF
+        
+        ; Far jump to flush the instruction pointer for Real Mode
+        jmp 0:.flush_unreal
+        
+    .flush_unreal:
+        xor ax, ax
+        mov ds, ax              ; CRITICAL: Set DS back to 0 for Real Mode addressing
+        ; ES is still "Big" (4GB limit). We will use ES for the destination move.
+        sti
 
+        ; === 2. INITIALIZE LOOP VARIABLES ===
+        mov edi, 0x100000           ; Destination: 1MB (32-bit offset)
+        mov edx, STAGE2_SECTORS + 1 ; Start LBA of the kernel
+        mov ecx, KERNEL_COUNT       ; Total sectors to read
+
+   .load_loop:
+        test ecx, ecx
+        jz .done_loading
+        
+        ; === 3. CALCULATE CHUNK SIZE ===
+        mov ebx, 64
+        cmp ecx, ebx
+        jae .size_fixed
+        mov ebx, ecx
+    .size_fixed:
+        
+        ; === 4. UPDATE THE DAP ===
+        mov [KERNEL_DAP + 2], bx
+        mov [KERNEL_DAP + 8], edx
+        
+        push ecx
+        push ebx
+        
+        ; === 5. BIOS READ ===
+        mov dl, [boot_drive]
+        mov si, KERNEL_DAP
+        mov ah, 0x42
+        int 0x13
+        jc .kernel_disk_error
+
+        ; === 5.5 BULLETPROOF ES LIMIT ===
+        ; BIOS interrupts often destroy the hidden 4GB limits!
+        ; We must refresh the ES descriptor before copying.
+        cli
+        mov eax, cr0
+        or al, 1
+        mov cr0, eax            ; Protected Mode ON
+        
+        mov ax, 0x08
+        mov es, ax              ; Restore "Big" ES limit
+        
+        and al, 0xFE
+        mov cr0, eax            ; Protected Mode OFF
+        jmp .flush_pipe         ; Flush instruction pipeline
+    .flush_pipe:
+        sti
+
+        ; === 6. THE MOVE ===
+        pop ebx                 ; Retrieve chunk size
+        mov ecx, ebx
+        shl ecx, 7              ; Convert sectors to dwords
+        
+        push ds
+        mov ax, 0x1000
+        mov ds, ax
+        xor esi, esi            ; DS:ESI = 0x1000:0x0000
+        
+        cld                     ; CRITICAL: Ensure we copy forwards!
+        a32 rep movsd           ; Copy to ES:EDI (0x100000+)
+        
+        pop ds
+        
+        ; === 7. INCREMENT PROGRESS ===
+        add edx, ebx
+        pop ecx
+        sub ecx, ebx
+        jnz .load_loop
+
+    mov si, msg_kernel_loaded
+    call print
+   
     mov si, msg_switching_pm
     call print
     jmp switch_protected_mode
@@ -33,6 +131,13 @@ stage2_entrypoint:
     ; ==========================================
     ; 16-BIT ERROR HANDLERS
     ; ==========================================
+    .kernel_disk_error:
+        mov si, msg_kernel_disk_error
+        call print
+        
+        mov si, msg_newline
+        jmp .halt
+
     .error_no_cpuid:
         mov si, err_cpuid
         jmp .halt
@@ -177,7 +282,7 @@ switch_protected_mode:
 
     ;;; PE bit
     mov eax, cr0
-    or al, 1
+    or eax, 1
     mov cr0, eax
 
     ;;;; FLUSH PIPELINE
@@ -196,67 +301,78 @@ switch_protected_mode:
         mov ebp, 0x90000
         mov esp, ebp
 
+setup_paging:
+    ; zero out 20kib region of page entries
+    mov edi, PML4_ADDR
+    push edi
+    xor eax, eax
+    mov ecx, 5*0x1000/4
+    cld
+    rep stosd
+    pop edi
 
-; setup_paging:
-;     ; zero out 20kib region of page entries
-;     mov edi, PML4_ADDR
-;     push edi
-;     xor eax, eax
-;     mov ecx, 5*0x1000/4
-;     cld
-;     rep stosd
-;     pop edi
+    ; virt mem for first 2 MB
+    ; fill out PML4_ADDR
+    mov DWORD [edi], PDPT_LOW & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
+    mov edi, PDPT_LOW
+    mov DWORD [edi], PD_LOW & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
+    mov edi, PD_LOW
+    mov DWORD [edi], 0 & PT_ADDR_MASK | PT_PRESENT | PT_WRITE | PT_LARGE_SIZE
 
-;     ; virt mem for first 2 MB
-;     ; fill out PML4_ADDR
-;     mov DWORD [edi], PDPT_LOW & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
-;     mov edi, PDPT_LOW
-;     mov DWORD [edi], PD_LOW & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
-;     mov edi, PD_LOW
-;     mov DWORD [edi], 0 & PT_ADDR_MASK | PT_PRESENT | PT_WRITE | PT_LARGE_SIZE
+    ; high half kernel mapping
+    ; alloc 1 gib
+    mov edi, PML4_ADDR+PML4_INDEX*8
+    mov DWORD [edi], PDPT_HIGH & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
+    mov edi, PDPT_HIGH+PDPT_INDEX*8
+    mov DWORD [edi], PD_HIGH & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
 
-;     ; high half kernel mapping
-;     ; alloc 1 gib
-;     mov edi, PML4_ADDR+PML4_INDEX*8
-;     mov DWORD [edi], PDPT_HIGH & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
-;     mov edi, PDPT_HIGH+PDPT_INDEX*8
-;     mov DWORD [edi], PD_HIGH & PT_ADDR_MASK | PT_PRESENT | PT_WRITE
+    mov edi, PD_HIGH
+    mov eax, PT_PRESENT | PT_WRITE | PT_LARGE_SIZE
+    mov ecx, 512 
+    .kernel_map_loop:
+        mov [edi], eax                   ; Store low 32 bits (entry is 8 bytes) 
+        mov dword [edi + 4], 0           ; Store high 32 bits 
+        add edi, 8                       ; Advance to next PD_HIGH entry 
+        add eax, 0x200000               ; Increment address by 2MiB
+        loop .kernel_map_loop
 
-;     mov edi, PD_HIGH
-;     mov eax, PT_PRESENT | PT_WRITE | PT_LARGE_SIZE
-;     mov ecx, 512 
-;     .kernel_map_loop:
-;         mov [edi], eax                   ; Store low 32 bits (entry is 8 bytes) 
-;         mov dword [edi + 4], 0           ; Store high 32 bits 
-;         add edi, 8                       ; Advance to next PD_HIGH entry 
-;         add eax, 0x200000               ; Increment address by 2MiB
-;         loop .kernel_map_loop
+enable_longmode:
+    ; [ ] Enable PAE (Physical Address Extension): Set bit 5 in CR4.
+    mov eax, cr4
+    or eax, 1 << 5
+    mov cr4, eax
+    ; [ ] Load CR3: Point the CPU to the address of your PML4 table.
+    mov eax, PML4_ADDR
+    mov cr3, eax
+    ; [ ] Enable Long Mode: Set the LME (Long Mode Enable) bit in the EFER MSR (Model Specific Register).
+    EFER_MSR equ 0xC0000080
+    EFER_LM_ENABLE equ 1 << 8
+
+    mov ecx, EFER_MSR
+    rdmsr
+    or eax, EFER_LM_ENABLE
+    wrmsr
+    ; [ ] Enable Paging: Set bit 31 in CR0. Now the CPU is in "Compatibility Mode."
+    mov eax, cr0
+    or eax, (1 << 31) | 1
+    mov cr0, eax
+    ; [ ] Load 64-bit GDT: (Often combined with step 5, but must be active now).
+    lgdt [gdt_descriptor] 
+    
+    ; =============== THIS TRIPLE FAULTS!
+    ; [ ] The Final Far Jump: jmp 0x08:kernel_entry. This officially puts you in 64-bit Long Mode.
+    jmp CODE_SEG:0x100000
 
 
-; enable_longmode:
-;     ; [ ] Enable PAE (Physical Address Extension): Set bit 5 in CR4.
-;     mov eax, cr4
-;     or eax, 1 << 5
-;     mov cr4, eax
-;     ; [ ] Load CR3: Point the CPU to the address of your PML4 table.
-;     mov eax, PML4_ADDR
-;     mov cr3, eax
-;     ; [ ] Enable Long Mode: Set the LME (Long Mode Enable) bit in the EFER MSR (Model Specific Register).
-;     EFER_MSR equ 0xC0000080
-;     EFER_LM_ENABLE equ 1 << 8
+gdt_start_unreal:
+    dq 0x0                  ; Null Descriptor
+    ; Data Segment: Base=0, Limit=0xFFFFF, G=1 (4GB), Read/Write
+    dw 0xFFFF, 0x0000, 0x9200, 0x00CF
+gdt_end_unreal:
 
-;     mov ecx, EFER_MSR
-;     rdmsr
-;     or eax, EFER_LM_ENABLE
-;     wrmsr
-;     ; [ ] Enable Paging: Set bit 31 in CR0. Now the CPU is in "Compatibility Mode."
-;     mov eax, cr0
-;     or eax, (1 << 31) | 1
-;     mov cr0, eax
-;     ; [ ] Load 64-bit GDT: (Often combined with step 5, but must be active now).
-;     lgdt [gdt_descriptor] 
-;     ; [ ] The Final Far Jump: jmp 0x08:kernel_entry. This officially puts you in 64-bit Long Mode.
-;     jmp CODE_SEG:kernel_entry
+gdt_descriptor_unreal:
+    dw gdt_end_unreal - gdt_start_unreal - 1
+    dd gdt_start_unreal
 
 ; ---- 32-bit GDT (The Stepping Stone) ----
 gdt_start_32:
@@ -332,16 +448,31 @@ PT_LARGE_SIZE equ (1 << 7)               ; Bit 7 => 2MB page size, ignore PT
 CODE_SEG equ 0x8
 DATA_SEG equ 0x10
 
+KERNEL_COUNT equ (kernel_blob_end - kernel_blob_start + 511) / 512
+
+align 8
+KERNEL_DAP:
+    db 0x10    ; size
+    db 0       ; reserved
+    dw 0       ; sector count (Loop fills this)
+    dw 0       ; offset (0x0000)
+    dw 0x1000  ; segment (0x1000:0x0000 = 0x10000)
+    dq 0       ; LBA (Loop fills this)
+
 ; --- Strings ---
+debug:       db 'debug', 13, 10, 0
 msg_stage2:       db 'Stage 2 Init...', 13, 10, 0
 msg_cpuid_ok:     db 'CPUID OK.', 13, 10, 0
 msg_lm_ok:        db 'Long Mode OK.', 13, 10, 0
 msg_a20_ok:       db 'A20 Enabled.', 13, 10, 0
 msg_switching_pm: db 'Entering 32-bit PM...', 13, 10, 0
 
+msg_newline:        db 13, 10, 0
 err_cpuid:        db 'ERR: No CPUID.', 13, 10, 0
 err_lm:           db 'ERR: No Long Mode.', 13, 10, 0
 err_a20:          db 'ERR: A20 Failed.', 13, 10, 0
+msg_kernel_disk_error: db 'ERR: Unable to load the rust kernel.', 0
 msg_loaded: db 'Stage 2 has loaded!!', 13, 10, 0x0
+msg_kernel_loaded: db 'Successfully loaded ENTIRE kernel from disk!', 13, 10, 0x0
 
 times 512 - ($ - $$) % 512 db 0

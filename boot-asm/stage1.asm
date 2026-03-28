@@ -27,6 +27,7 @@ start:
     
     mov si, bootup_message
     call print
+ 
     
     .load_disk_stage_2:
         mov dl, [boot_drive]
@@ -61,7 +62,7 @@ print:
 
 
 ; Safe sector rounding formula
-STAGE2_SECTORS equ ((stage2_end - stage2_start + 511) / 512)
+STAGE2_SECTORS equ (stage2_end - stage2_start + 511) / 512
     
 align 4
 STAGE2_DAP:
@@ -71,7 +72,6 @@ STAGE2_DAP:
     dw stage2_start ; mem offset
     dw 0
     dq 1 ; stage2 starts at sector 2
-
 
 boot_drive: db 0
 bootup_message: db 'XiangQi OS is booting up', 13, 10, 0x0
