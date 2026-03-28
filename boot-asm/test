@@ -1,4 +1,0 @@
-#!/bin/sh
-
-make
-qemu-system-x86_64 -drive format=raw,file=qi.img -d cpu_reset -no-reboot

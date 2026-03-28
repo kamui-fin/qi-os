@@ -9,10 +9,6 @@ stage2_start:
 stage2_end:
 
 ; TODO: enable graphics mode
-;       load kernel into ram (parse ELF)
-;       far jump to kernel entry.
-; For now we will use this dummy kernel
-
 kernel_blob_start:
     incbin "../kernel.bin"
 kernel_blob_end:

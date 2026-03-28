@@ -1,0 +1,4 @@
+#!/bin/sh
+
+make
+qemu-system-x86_64 -d int -no-reboot -drive file=qi.img,format=raw
