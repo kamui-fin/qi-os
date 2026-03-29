@@ -25,9 +25,12 @@ stage2_entrypoint:
     jz .error_a20
     mov si, msg_a20_ok
     call print
-    
-    call load_kernel
 
+    ; call get_memory_map
+
+    call load_all_components
+
+    
     mov si, msg_switching_pm
     call print
     jmp switch_protected_mode
@@ -61,7 +64,8 @@ stage2_entrypoint:
 
 %include "cpu-checks.asm"
 %include "a20.asm"
-%include "load-kernel.asm"
+%include "load-disk.asm"
+%include "hwinfo.asm"
 
 switch_protected_mode:
     cli
@@ -115,8 +119,8 @@ enable_longmode:
     ; [ ] Load 64-bit GDT: (Often combined with step 5, but must be active now).
     lgdt [gdt_descriptor] 
     
-    ; [ ] The Final Far Jump: jmp 0x08:kernel_entry. This officially puts you in 64-bit Long Mode.
-    jmp CODE_SEG:0x100000
+    ; [ ] The Final Far Jump: jmp 0x08:stage3_start. This officially puts you in 64-bit Long Mode.
+    jmp CODE_SEG:0x10000
 
 
 %include "gdt.asm"

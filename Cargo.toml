@@ -4,9 +4,25 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["kernel"]
+members = ["kernel", "bootloader"]
 
 [dependencies]
 
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = false
+debug = true
+overflow-checks = true
+
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
+
+[profile.stage-3]
+inherits = "release"
+opt-level = 'z'      # Optimize for size
+lto = true           # Crucial: link-time optimization merges code and removes GOTs
+strip = true         # Removes symbols that could bloat the binary
+panic = "abort"      # Mandatory for no_std
