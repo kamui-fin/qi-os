@@ -26,13 +26,17 @@ stage2_entrypoint:
     mov si, msg_a20_ok
     call print
 
-    ; call get_memory_map
+    call get_memory_map
 
     call load_all_components
 
-    
-    mov si, msg_switching_pm
-    call print
+    mov ax, 1280
+    mov bx, 1024
+    mov cl, 16
+    call vbe_set_mode
+
+    ; mov si, msg_switching_pm
+    ; call print
     jmp switch_protected_mode
 
     ; ==========================================
@@ -66,6 +70,7 @@ stage2_entrypoint:
 %include "a20.asm"
 %include "load-disk.asm"
 %include "hwinfo.asm"
+%include "graphics.asm"
 
 switch_protected_mode:
     cli
@@ -120,6 +125,7 @@ enable_longmode:
     lgdt [gdt_descriptor] 
     
     ; [ ] The Final Far Jump: jmp 0x08:stage3_start. This officially puts you in 64-bit Long Mode.
+    mov edi, screen
     jmp CODE_SEG:0x10000
 
 

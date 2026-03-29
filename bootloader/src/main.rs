@@ -4,9 +4,24 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
-use crate::printer::print_debug;
+#[repr(C, packed)]
+#[allow(dead_code)]
+struct MemoryMapEntry {
+    /*
+    24-byte entry follows this structure:
 
-mod printer;
+    Base Address (8 bytes)
+
+    Length (8 bytes)
+
+    Type (4 bytes) — 1 is "Available RAM", others are reserved.
+
+    ACPI Flags (4 bytes) */
+    base_address: u64,
+    length: u64,
+    mem_type: u32,
+    acpi_flags: u32,
+}
 
 #[repr(C)]
 struct Elf64Ehdr {
@@ -37,11 +52,25 @@ struct Elf64Phdr {
 
 const VIRTUAL_BASE_ADDR: usize = 0xFFFFFFFF80000000;
 
+#[repr(C)]
+pub struct Screen {
+    pub width: u32,
+    pub height: u32,
+    pub bpp: u32,
+    pub bytes_per_pixel: u32,
+    pub bytes_per_line: u32,
+    pub screen_size: u32,
+    pub screen_size_dqwords: u32,
+    pub framebuffer: u32,
+    pub x: u32,
+    pub y: u32,
+    pub x_max: u32,
+    pub y_max: u32,
+}
+
 #[no_mangle]
 #[link_section = ".text._start"]
-pub extern "C" fn _start() -> ! {
-    print_debug(&"Rust stage3 bootloader activated", 0, 0, 0x0F);
-
+pub extern "C" fn _start(screen: *const Screen) -> ! {
     let elf_base = VIRTUAL_BASE_ADDR + 0x1000000;
 
     unsafe {
@@ -72,10 +101,9 @@ pub extern "C" fn _start() -> ! {
         }
 
         asm!(
-            "push {sel:r}",       // Push segment selector (cast to register width)
-            "push {addr}",        // Push the offset (entry point)
-            "retfq",              // Far return: pops addr into RIP and sel into CS
-            sel = in(reg) 0x08u64,
+            "mov rdi, {screen}",
+            "jmp {addr}",              // Far return: pops addr into RIP and sel into CS
+            screen = in(reg) screen as u64,
             addr = in(reg) ehdr.e_entry,
             options(noreturn)
         );
@@ -84,7 +112,5 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    // 0x4F is White text on a Red background
-    print_debug(_info, 24, 0, 0x4F);
     loop {}
 }
