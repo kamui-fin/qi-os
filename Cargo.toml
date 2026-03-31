@@ -5,6 +5,7 @@ edition = "2021"
 
 [workspace]
 members = ["kernel", "bootloader"]
+resolver = "2"
 
 [dependencies]
 

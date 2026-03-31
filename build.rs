@@ -37,6 +37,8 @@ fn main() {
     let stage3_elf = out_dir.join("bin").join("bootloader");
     let kernel_elf =
         PathBuf::from(env::var("CARGO_BIN_FILE_KERNEL").expect("Kernel bin not found"));
+    // copy over the elf to target/kernel_elf for debugging
+
     let stage3_bin = out_dir.join("stage3.bin");
     let boot_asm_bin = out_dir.join("boot.bin");
     let final_disk_img = root_dir.join("target").join("disk.img");
@@ -84,6 +86,9 @@ fn main() {
 
     // Append the pristine ELF kernel
     disk_img.extend_from_slice(&kernel_data);
+
+    let path = root_dir.join("target").join("kernel");
+    fs::write(path, kernel_data).unwrap();
 
     fs::write(&final_disk_img, disk_img).expect("Failed to write final disk.img");
 }

@@ -3,9 +3,9 @@
 ;       The consequence of overwriting the BIOS code will lead to problems like getting stuck in `int 0x15`
 ; inputs: es:di -> destination buffer for 24 byte entries
 ; outputs: bp = entry count, trashes all registers except esi
-mmap_ent equ 0x1000             ; the number of entries will be stored at 0x8000
+mmap_ent equ 0x1004             ; the number of entries will be stored at 0x8000
 get_memory_map:
-    mov di, 0x1004          ; Set di to 0x8004. Otherwise this code will get stuck in `int 0x15` after some entries are fetched 
+    mov di, 0x1008          ; Set di to 0x8004. Otherwise this code will get stuck in `int 0x15` after some entries are fetched 
 	xor ebx, ebx		; ebx must be 0 to start
 	xor bp, bp		; keep an entry count in bp
 	mov edx, 0x0534D4150	; Place "SMAP" into edx

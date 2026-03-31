@@ -1,7 +1,10 @@
 ENTRY(_start)
 
+KERNEL_OFFSET = 0xFFFFFFFF80000000;
+KERNEL_START = 0x100000;
+
 SECTIONS {
-    . = 0x100000;
+    . = KERNEL_OFFSET + KERNEL_START;
 
     .text : ALIGN(4K) {
         KEEP(*(.text._start))

@@ -1,144 +1,195 @@
 #![no_std]
 #![no_main]
+#![feature(step_trait)]
 
-use core::fmt::{Debug, Write};
+use alloc::boxed::Box;
 use core::panic::PanicInfo;
+use kernel::graphics::Screen;
+use kernel::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
+use kernel::task::executor::Executor;
+use kernel::task::keyboard::print_keypresses;
+use kernel::task::Task;
+use kernel::{allocator, memory, println, serial, serial_println};
+use x86_64::instructions::tlb::flush_all;
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::frame::{self, PhysFrameRangeInclusive};
+use x86_64::structures::paging::{
+    page, FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
+    PhysFrame, Size2MiB, Translate,
+};
+use x86_64::{PhysAddr, VirtAddr};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Screen {
-    pub width: u32,
-    pub height: u32,
-    pub bpp: u32,
-    pub bytes_per_pixel: u32,
-    pub bytes_per_line: u32,
-    pub screen_size: u32,
-    pub screen_size_dqwords: u32,
-    pub framebuffer: u32,
-    pub x: u32,
-    pub y: u32,
-    pub x_max: u32,
-    pub y_max: u32,
-}
+extern crate alloc;
 
-unsafe fn outb(port: u16, val: u8) {
-    core::arch::asm!("out dx, al", in("dx") port, in("al") val);
-}
-
-unsafe fn inb(port: u16) -> u8 {
-    let val: u8;
-    core::arch::asm!("in al, dx", out("al") val, in("dx") port);
-    val
-}
-
-fn serial_init() {
-    unsafe {
-        let port = 0x3F8;
-
-        outb(port + 1, 0x00); // disable interrupts
-        outb(port + 3, 0x80); // enable DLAB
-        outb(port + 0, 0x03); // divisor low (38400 baud)
-        outb(port + 1, 0x00); // divisor high
-        outb(port + 3, 0x03); // 8 bits, no parity, 1 stop
-        outb(port + 2, 0xC7); // enable FIFO
-        outb(port + 4, 0x0B); // IRQs enabled, RTS/DSR
-    }
-}
-fn serial_ready() -> bool {
-    unsafe { (inb(0x3F8 + 5) & 0x20) != 0 }
-}
-
-fn serial_write(byte: u8) {
-    while !serial_ready() {}
-    unsafe {
-        outb(0x3F8, byte);
-    }
-}
-
-fn print(s: &str) {
-    for b in s.bytes() {
-        serial_write(b);
-    }
-}
-
-fn print_hex(mut x: u64) {
-    let mut buf = [0u8; 16];
-
-    for i in (0..16).rev() {
-        let digit = (x & 0xF) as u8;
-        buf[i] = match digit {
-            0..=9 => b'0' + digit,
-            _ => b'A' + (digit - 10),
-        };
-        x >>= 4;
-    }
-
-    print("0x");
-    for b in buf {
-        serial_write(b);
-    }
-}
+/// Start address of the first frame that is not part of the lower 1MB of frames
+const LOWER_MEMORY_END_PAGE: u64 = 0x10_0000;
 
 #[no_mangle]
-pub extern "C" fn _start(screen: *const Screen) -> ! {
-    serial_init();
-    print("hello from kernel\n");
+pub extern "C" fn _start(screen: *const Screen, kernel_size_bytes: u64) -> ! {
+    serial::init();
+    serial_println!("Qi OS booted up!\n");
 
-    let s = unsafe { &*screen };
+    let phys_mem_offset = VirtAddr::new(0xFFFF_8000_0000_0000);
+    let kernel_base_virt: VirtAddr = VirtAddr::new(0xFFFFFFFF80000000);
+    let kernel_base_phys: PhysAddr = PhysAddr::new(0x100000);
 
-    print("screen ptr: ");
-    print_hex(screen as u64);
-    print("\n");
+    let mem_map: &'static mut [MemoryMapEntry] = unsafe { memory::get_mem_map() };
+    mem_map.sort_unstable_by_key(|reg| reg.base_address);
 
-    print("width: ");
-    print_hex(s.width as u64);
-    print("\n");
+    let mut frame_allocator = BootInfoFrameAllocator::starts_at(
+        LOWER_MEMORY_END_PAGE,
+        mem_map,
+        UsedRegion {
+            start_address: kernel_base_phys,
+            size: kernel_size_bytes,
+        },
+    );
 
-    print("height: ");
-    print_hex(s.height as u64);
-    print("\n");
-
-    print("bpp: ");
-    print_hex(s.bpp as u64);
-    print("\n");
-
-    print("pitch: ");
-    print_hex(s.bytes_per_line as u64);
-    print("\n");
-
-    print("framebuffer: ");
-    print_hex(s.framebuffer as u64);
-    print("\n");
-
-    print("x_max: ");
-    print_hex(s.x_max as u64);
-    print("\n");
-
-    print("y_max: ");
-    print_hex(s.y_max as u64);
-    print("\n");
-
-    let fb = s.framebuffer as *mut u32; // 32-bit framebuffer
-    let width = s.width as usize;
-    let height = s.height as usize;
-    let pitch = s.bytes_per_line as usize / 4; // pitch in pixels
-
-    // Draw a simple gradient
-    for y in 0..height {
-        for x in 0..width {
-            let pixel = ((x * 255 / width) as u32) << 16  // red
-                      | ((y * 255 / height) as u32) << 8 // green
-                      | 0x00; // blue
-            unsafe {
-                *fb.add(y * pitch + x) = pixel;
-            }
+    let (mut kernel_page_table, kernel_level_4_frame) = {
+        let frame: PhysFrame = frame_allocator.allocate_frame().expect("no usable memory");
+        let addr = kernel_base_virt + frame.start_address().as_u64();
+        let ptr: *mut PageTable = addr.as_mut_ptr();
+        unsafe {
+            ptr.write(PageTable::new());
         }
+        let level_4_table = unsafe { &mut *ptr };
+        (
+            unsafe { OffsetPageTable::new(level_4_table, kernel_base_virt) },
+            frame,
+        )
+    };
+
+    /* map high half kernel again */
+    let start_frame = PhysFrame::<Size2MiB>::containing_address(kernel_base_phys);
+    let end_frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(
+        kernel_base_phys.as_u64() + kernel_size_bytes - 1,
+    ));
+    let frame_range = PhysFrame::range_inclusive(start_frame, end_frame);
+    for frame in frame_range {
+        let phys_start_addr = frame.start_address();
+        let virt_addr = VirtAddr::new(phys_start_addr.as_u64() + kernel_base_virt.as_u64());
+        let page = Page::containing_address(virt_addr);
+        serial_println!("Mapping {:?} page to {:?} frame", page, frame);
+        let mapper_flush = unsafe {
+            kernel_page_table
+                .map_to(
+                    page,
+                    frame,
+                    PageTableFlags::WRITABLE | PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .expect("(fixed offset mapping): unable to map page")
+        };
+        mapper_flush.flush();
     }
 
-    loop {}
+    // /* map all physical memory at a fixed offset */
+    let start_frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(0));
+    let last_address = mem_map
+        .iter()
+        .filter_map(|region| {
+            if region.mem_type == 1 {
+                Some(region.end_addr())
+            } else {
+                None
+            }
+        })
+        .last()
+        .expect("no usable regions");
+    let end_frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(last_address));
+    let frame_range = PhysFrame::range_inclusive(start_frame, end_frame);
+    for frame in frame_range {
+        let phys_start_addr = frame.start_address();
+        let virt_addr = VirtAddr::new(phys_start_addr.as_u64() + phys_mem_offset.as_u64());
+        let page = Page::containing_address(virt_addr);
+        let mapper_flush = unsafe {
+            kernel_page_table
+                .map_to(
+                    page,
+                    frame,
+                    PageTableFlags::WRITABLE | PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .expect("(fixed offset mapping): unable to map page")
+        };
+        mapper_flush.ignore();
+    }
+
+    // flush_all();
+
+    // let s = unsafe { &*screen };
+    // let fb = s.framebuffer as *mut u32; // 32-bit framebuffer
+    // let width = s.width as usize;
+    // let height = s.height as usize;
+    // let pitch = s.bytes_per_line as usize / 4; // pitch in pixels
+    // // Draw a simple gradient
+    // for y in 0..height {
+    //     for x in 0..width {
+    //         let pixel = ((x * 255 / width) as u32) << 16  // red
+    //                   | ((y * 255 / height) as u32) << 8 // green
+    //                   | 0x00; // blue
+    //         unsafe {
+    //             *fb.add(y * pitch + x) = pixel;
+    //         }
+    //     }
+    // }
+
+    // // new: initialize a mapper
+    // let mut mapper = unsafe { memory::init(phys_mem_offset) };
+
+    // let addresses = [
+    //     // the identity-mapped vga buffer page
+    //     0xb8000,
+    //     // some code page
+    //     0x201008,
+    //     // some stack page
+    //     0x0100_0020_1a10,
+    //     // virtual address mapped to physical address 0
+    //     boot_info.physical_memory_offset,
+    // ];
+
+    // for &address in &addresses {
+    //     let virt = VirtAddr::new(address);
+    //     // new: use the `mapper.translate_addr` method
+    //     let phys = mapper.translate_addr(virt);
+    //     println!("{:?} -> {:?}", virt, phys);
+    // }
+
+    // let mut frame_allocator =
+    //     unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    // allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+
+    // let x = Box::new(41);
+    // let y = Box::new(50);
+    // println!("x = {:?}", x);
+    // println!("y = {:?}", y);
+
+    // let mut executor = Executor::new();
+    // executor.spawn(Task::new(example_task()));
+    // executor.spawn(Task::new(print_keypresses()));
+    // executor.run();
+
+    // // #[cfg(test)]
+    // // test_main();
+
+    // println!("It did not crash!");
+    kernel::hlt_loop();
 }
 
+/// This function is called on panic.
+// #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+fn panic(info: &PanicInfo) -> ! {
+    serial_println!("{}", info);
+    kernel::hlt_loop();
+}
+
+async fn async_number() -> u32 {
+    42
+}
+
+async fn example_task() {
+    let number = async_number().await;
+    println!("async number: {}", number);
 }
