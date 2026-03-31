@@ -23,6 +23,11 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 [[package]]
 name = "bootloader"
 version = "0.1.0"
+dependencies = [
+ "spin 0.5.2",
+ "uart_16550",
+ "x86_64",
+]
 
 [[package]]
 name = "conquer-once"

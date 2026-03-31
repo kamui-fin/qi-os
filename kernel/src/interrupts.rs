@@ -1,6 +1,7 @@
 use crate::hlt_loop;
 use crate::print;
 use crate::println;
+use crate::serial_println;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
@@ -26,6 +27,7 @@ lazy_static! {
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        idt.general_protection_fault.set_handler_fn(gpf_handler);
 
         idt
     };
@@ -35,8 +37,15 @@ pub fn init_idt() {
     IDT.load();
 }
 
+extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    panic!(
+        "EXCEPTION: GENERAL PROTECTION FAULT\nError Code: {:#x}\n{:#?}",
+        error_code, stack_frame
+    );
+}
+
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
-    println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+    serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -123,9 +132,9 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::Cr2;
 
-    println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
+    serial_println!("EXCEPTION: PAGE FAULT");
+    serial_println!("Accessed Address: {:?}", Cr2::read());
+    serial_println!("Error Code: {:?}", error_code);
+    serial_println!("{:#?}", stack_frame);
     hlt_loop();
 }

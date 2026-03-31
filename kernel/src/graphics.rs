@@ -14,3 +14,7 @@ pub struct Screen {
     pub x_max: u32,
     pub y_max: u32,
 }
+
+pub struct FrameBuffer {
+
+}

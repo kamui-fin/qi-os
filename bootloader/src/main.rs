@@ -4,6 +4,20 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
+use x86_64::{
+    structures::paging::{
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
+        PhysFrame, Size2MiB, Size4KiB,
+    },
+    PhysAddr, VirtAddr,
+};
+
+use crate::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
+
+mod memory;
+mod serial;
+
+const LOWER_MEMORY_END_PAGE: u64 = 0x10_0000;
 pub const KERNEL_BASE_ADDR: usize = 0xFFFFFFFF80000000;
 
 #[repr(C)]
@@ -22,19 +36,188 @@ pub struct Screen {
     pub y_max: u32,
 }
 
+#[repr(C)]
+pub struct BootInfo<'a> {
+    screen: &'a Screen,
+    allocator: BootInfoFrameAllocator,
+    page_table: OffsetPageTable<'a>,
+    physical_memory_offset: u64,
+}
+
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start(screen: *const Screen) -> ! {
-    unsafe {
-        let (kernel_address, size) = load_kernel_elf();
+    serial::init();
+    serial_println!("STAGE 3 BOOTLOADER BEGIN!");
 
+    let (kernel_address, kernel_size_bytes) = unsafe { load_kernel_elf() };
+
+    let screen = unsafe { &(*screen) };
+
+    let phys_mem_offset = VirtAddr::new(0xFFFF_8000_0000_0000);
+    let kernel_base_virt: VirtAddr = VirtAddr::new(0xFFFFFFFF80000000);
+    let kernel_base_phys: PhysAddr = PhysAddr::new(0x100000);
+
+    let mem_map: &'static mut [MemoryMapEntry] = unsafe { memory::get_mem_map() };
+    mem_map.sort_unstable_by_key(|reg| reg.base_address);
+
+    let mut frame_allocator = BootInfoFrameAllocator::starts_at(
+        LOWER_MEMORY_END_PAGE,
+        mem_map,
+        UsedRegion {
+            start_address: kernel_base_phys,
+            size: kernel_size_bytes,
+        },
+    );
+
+    let (mut kernel_page_table, kernel_level_4_frame) = {
+        let frame: PhysFrame = frame_allocator.allocate_frame().expect("no usable memory");
+        let addr = kernel_base_virt + frame.start_address().as_u64();
+        let ptr: *mut PageTable = addr.as_mut_ptr();
+        unsafe {
+            ptr.write(PageTable::new());
+        }
+        let level_4_table = unsafe { &mut *ptr };
+        (
+            unsafe { OffsetPageTable::new(level_4_table, kernel_base_virt) },
+            frame,
+        )
+    };
+
+    /* identity map the framebuffer */
+    let fb_addr = PhysAddr::new(screen.framebuffer as u64);
+    let start_frame: PhysFrame = PhysFrame::containing_address(fb_addr);
+    let end_frame: PhysFrame =
+        PhysFrame::containing_address(fb_addr + (screen.bytes_per_line * screen.height) as usize);
+    let frame_range = PhysFrame::range_inclusive(start_frame, end_frame);
+    for frame in frame_range {
+        let mapper_flush = unsafe {
+            kernel_page_table
+                .identity_map(
+                    frame,
+                    PageTableFlags::WRITABLE | PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .expect("(fixed offset mapping): unable to map page")
+        };
+        mapper_flush.flush();
+    }
+
+    /* map high half kernel again */
+    let kernel_start_frame = PhysFrame::<Size2MiB>::containing_address(kernel_base_phys);
+    let kernel_end_frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(
+        kernel_base_phys.as_u64() + kernel_size_bytes - 1,
+    ));
+    let kernel_frame_range = PhysFrame::range_inclusive(kernel_start_frame, kernel_end_frame);
+    serial_println!("Mapping high half kernel: {:#?}", kernel_frame_range);
+    for frame in kernel_frame_range {
+        let phys_start_addr = frame.start_address();
+        let virt_addr = VirtAddr::new(phys_start_addr.as_u64() + kernel_base_virt.as_u64());
+        let page = Page::containing_address(virt_addr);
+        serial_println!("Mapping {:?} page to {:?} frame", page, frame);
+        let mapper_flush = unsafe {
+            kernel_page_table
+                .map_to(
+                    page,
+                    frame,
+                    PageTableFlags::WRITABLE | PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .expect("(fixed offset mapping): unable to map page")
+        };
+        mapper_flush.flush();
+    }
+
+    let kernel_stack_size = 512 * Size4KiB::SIZE;
+    // create a stack
+    let stack_start = Page::containing_address(VirtAddr::new(0xFFFFFFFF82000000));
+    let stack_end_addr = stack_start.start_address() + kernel_stack_size;
+    let stack_end = Page::containing_address(stack_end_addr - 1u64);
+    for page in Page::range_inclusive(stack_start, stack_end) {
+        let frame = frame_allocator
+            .allocate_frame()
+            .expect("frame allocation failed when mapping a kernel stack");
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        match unsafe { kernel_page_table.map_to(page, frame, flags, &mut frame_allocator) } {
+            Ok(tlb) => tlb.flush(),
+            Err(err) => panic!("failed to map page {:?}: {:?}", page, err),
+        }
+    }
+
+    /* map all physical memory at a fixed offset */
+    let start_frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(0));
+    let last_address = mem_map
+        .iter()
+        .filter_map(|region| {
+            if region.mem_type == 1 {
+                Some(region.end_addr())
+            } else {
+                None
+            }
+        })
+        .last()
+        .expect("no usable regions");
+    let end_frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(last_address));
+    let frame_range = PhysFrame::range_inclusive(start_frame, end_frame);
+    for frame in frame_range {
+        let phys_start_addr = frame.start_address();
+        let virt_addr = VirtAddr::new(phys_start_addr.as_u64() + phys_mem_offset.as_u64());
+        let page = Page::containing_address(virt_addr);
+        let mapper_flush = unsafe {
+            kernel_page_table
+                .map_to(
+                    page,
+                    frame,
+                    PageTableFlags::WRITABLE | PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .expect("(fixed offset mapping): unable to map page")
+        };
+        mapper_flush.ignore();
+    }
+
+    /* IDENTITY MAP THE LOWER 1MB (Crucial for the CR3 switch!) */
+    let lower_start = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(0));
+    let lower_end =
+        PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(LOWER_MEMORY_END_PAGE - 1));
+    let lower_range = PhysFrame::range_inclusive(lower_start, lower_end);
+    for frame in lower_range {
+        let mapper_flush = unsafe {
+            kernel_page_table
+                .identity_map(
+                    frame,
+                    PageTableFlags::WRITABLE | PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .expect("failed to identity map lower 1MB")
+        };
+        mapper_flush.ignore();
+    }
+
+    let kstack_top = stack_end_addr.align_down(16u8);
+    let kstack_bottom = stack_start.start_address();
+
+    x86_64::instructions::tlb::flush_all();
+
+    let boot_info = BootInfo {
+        screen,
+        allocator: frame_allocator,
+        page_table: kernel_page_table,
+        physical_memory_offset: phys_mem_offset.as_u64(),
+    };
+
+    serial_println!("Finished mapping everything.");
+
+    unsafe {
         asm!(
-            "mov rdi, {screen}",
-            "mov rsi, {size}",
-            "jmp {addr}",
-            screen = in(reg) screen as u64,
-            size = in(reg) size,
-            addr = in(reg) kernel_address,
+            "mov cr3, {cr3_val}",
+            "mov rsp, {rsp_val}",
+            "xor rbp, rbp",
+            "jmp {kernel_entry}",
+            cr3_val = in(reg) kernel_level_4_frame.start_address().as_u64(),
+            rsp_val = in(reg) kstack_top.as_u64(),
+            kernel_entry = in(reg) kernel_address,
+            in("rdi") &boot_info as *const _, // SysV ABI: 1st argument goes in RDI
             options(noreturn)
         );
     }

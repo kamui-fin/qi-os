@@ -14,6 +14,7 @@ pub mod task;
 pub mod vga_buffer;
 
 pub fn init() {
+    serial::init();
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
