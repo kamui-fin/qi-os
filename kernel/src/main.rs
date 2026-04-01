@@ -5,7 +5,7 @@
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::panic::PanicInfo;
-use kernel::graphics::Screen;
+use kernel::graphics::{Color, Position, Screen};
 use kernel::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
@@ -27,7 +27,7 @@ extern crate alloc;
 #[repr(C)]
 #[derive(Debug)]
 pub struct BootInfo<'a> {
-    screen: &'a Screen,
+    screen: &'a mut Screen,
     allocator: BootInfoFrameAllocator,
     page_table: OffsetPageTable<'a>,
     physical_memory_offset: u64,
@@ -39,15 +39,22 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
 
     serial_println!("Qi OS booted up!\n");
     let boot_info = unsafe { &mut *boot_info };
+    let screen = &mut boot_info.screen;
 
-    let s = boot_info.screen;
-    let fb = s.framebuffer as *mut u32; // 32-bit framebuffer
-    let width = s.width as usize;
-    let height = s.height as usize;
-    let pitch = s.bytes_per_line as usize / 4; // pitch in pixels
+    let color = Color {
+        red: 0,
+        green: 0,
+        blue: 255,
+    };
 
-    for byte in fb.buffer_mut() {
-        *byte = 0x90;
+    for x in 0..100 {
+        for y in 0..100 {
+            let position = Position {
+                x: 20 + x,
+                y: 100 + y,
+            };
+            screen.set_pixel_in(position, color);
+        }
     }
 
     // new: initialize a mapper
