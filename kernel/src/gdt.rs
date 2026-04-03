@@ -27,26 +27,45 @@ lazy_static! {
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
         let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
         let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
+        /*
+        3 	0x18 	user code segment 	0x00000000 - 0xFFFFFFFF 	RX 	PL3
+        4 	0x20 	user data segment 	0x00000000 - 0xFFFFFFFF 	RW 	PL3
+         */
+        let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
+        let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
         (
             gdt,
             Selectors {
                 code_selector,
                 data_selector,
                 tss_selector,
+                user_code_selector,
+                user_data_selector,
             },
         )
     };
 }
 
+// for switch.s
+#[no_mangle]
+pub static mut TSS_POINTER: *mut TaskStateSegment = core::ptr::null_mut();
+
 struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
 }
 
 pub fn init() {
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
+
+    let tss_ref = &*TSS;
+    unsafe {
+        TSS_POINTER = tss_ref as *const _ as *mut _;
+    }
 
     GDT.0.load();
 

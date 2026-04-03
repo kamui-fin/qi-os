@@ -5,12 +5,23 @@
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::panic::PanicInfo;
-use kernel::graphics::{Color, Position, Screen};
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyle},
+    prelude::*,
+    text::Text,
+};
+use kernel::allocator::init_heap;
+use kernel::graphics::Screen;
 use kernel::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::Task;
+use kernel::thread::{
+    sched, switch_to_task, Scheduler, ThreadControlBlock, CURR_THREAD_PTR, MAIN_THREAD,
+};
 use kernel::{allocator, init, memory, println, serial, serial_println};
+use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::frame::{self, PhysFrameRangeInclusive};
@@ -39,61 +50,40 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
 
     serial_println!("Qi OS booted up!\n");
     let boot_info = unsafe { &mut *boot_info };
-    let screen = &mut boot_info.screen;
+    serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
 
-    let color = Color {
-        red: 0,
-        green: 0,
-        blue: 255,
-    };
+    // Create a new character style
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
 
-    for x in 0..100 {
-        for y in 0..100 {
-            let position = Position {
-                x: 20 + x,
-                y: 100 + y,
-            };
-            screen.set_pixel_in(position, color);
-        }
-    }
+    // Create a text at position (20, 30) and draw it using the previously defined style
+    Text::new("Hello Rust!", Point::new(20, 30), style).draw(boot_info.screen);
 
-    // new: initialize a mapper
     let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
-
-    let addresses = [
-        // the identity-mapped vga buffer page
-        0xb8000,
-        0xFFFFFFFF80000001,
-        0xFFFFFFFF8000A000,
-        // virtual address mapped to physical address 0
-        boot_info.physical_memory_offset,
-    ];
-
-    for &address in &addresses {
-        let virt = VirtAddr::new(address);
-        // new: use the `mapper.translate_addr` method
-        let phys = mapper.translate_addr(virt);
-        serial_println!("{:?} -> {:?}", virt, phys);
-    }
-
     allocator::init_heap(&mut mapper, &mut boot_info.allocator)
         .expect("heap initialization failed");
 
-    let x = Box::new(41);
-    let y = Box::new(50);
-    serial_println!("x = {:?}", x);
-    serial_println!("y = {:?}", y);
+    unsafe {
+        MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
+        CURR_THREAD_PTR = MAIN_THREAD as *mut ThreadControlBlock;
+    }
 
-    let mut executor = Executor::new();
-    executor.spawn(Task::new(example_task()));
-    executor.spawn(Task::new(print_keypresses()));
-    // executor.run();
+    let mut scheduler = Scheduler::new();
 
-    // // #[cfg(test)]
-    // // test_main();
+    // spawn some threads
+    scheduler.spawn("Second thread", thread_func as *const ());
 
-    serial_println!("It did not crash!");
-    kernel::hlt_loop();
+    loop {
+        scheduler.lock();
+        scheduler.schedule();
+        scheduler.unlock();
+    }
+}
+
+fn thread_func() {
+    loop {
+        serial_println!("********* YOOO IM THE GUY FROM THREAD TWO!!! **********");
+        sched();
+    }
 }
 
 /// This function is called on panic.
@@ -102,13 +92,4 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
 fn panic(info: &PanicInfo) -> ! {
     serial_println!("{}", info);
     kernel::hlt_loop();
-}
-
-async fn async_number() -> u32 {
-    42
-}
-
-async fn example_task() {
-    let number = async_number().await;
-    serial_println!("async number: {}", number);
 }

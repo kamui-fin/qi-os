@@ -1,3 +1,11 @@
+use embedded_graphics::{
+    pixelcolor::{raw::ToBytes, Rgb565},
+    prelude::{OriginDimensions, Point, RgbColor, Size},
+    Pixel,
+};
+
+use crate::serial_println;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Screen {
@@ -25,34 +33,41 @@ impl Screen {
         }
     }
 
-    pub fn set_pixel_in(&mut self, position: Position, color: Color) {
+    pub fn set_pixel_in(&mut self, position: Point, color: Rgb565) {
         // calculate offset to first byte of pixel
         let byte_offset = {
-            // use stride to calculate pixel offset of target line
-            let line_offset = position.y * self.width as usize;
-            // add x position to get the absolute pixel offset in buffer
-            let pixel_offset = line_offset + position.x;
-            // convert to byte offset
-            pixel_offset * self.bytes_per_pixel as usize
-        };
+            // use stride (bytes_per_line) to calculate byte offset of target line
+            let line_offset = position.y as u32 * self.bytes_per_line;
+            // add x position in bytes to get the absolute pixel byte offset in buffer
+            line_offset + (position.x as u32 * self.bytes_per_pixel)
+        } as usize;
 
-        // set pixel based on color format
         let pixel_buffer = &mut self.buffer_mut()[byte_offset..];
-        pixel_buffer[0] = color.red;
-        pixel_buffer[1] = color.green;
-        pixel_buffer[2] = color.blue;
+        let bytes = color.to_le_bytes();
+        pixel_buffer[0] = bytes[0];
+        pixel_buffer[1] = bytes[1];
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Position {
-    pub x: usize,
-    pub y: usize,
+impl embedded_graphics::draw_target::DrawTarget for Screen {
+    type Color = embedded_graphics::pixelcolor::Rgb565;
+
+    /// Drawing operations can never fail.
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(coordinates, color) in pixels.into_iter() {
+            self.set_pixel_in(coordinates, color);
+        }
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Color {
-    pub red: u8,
-    pub green: u8,
-    pub blue: u8,
+impl OriginDimensions for Screen {
+    fn size(&self) -> Size {
+        Size::new(self.width, self.height)
+    }
 }
