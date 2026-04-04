@@ -20,7 +20,7 @@ use kernel::task::Task;
 use kernel::thread::{
     sched, switch_to_task, Scheduler, ThreadControlBlock, CURR_THREAD_PTR, MAIN_THREAD,
 };
-use kernel::{allocator, init, memory, println, serial, serial_println};
+use kernel::{allocator, hlt_loop, init, memory, println, serial, serial_println};
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -51,11 +51,10 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
     serial_println!("Qi OS booted up!\n");
     let boot_info = unsafe { &mut *boot_info };
     serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
+    
+    kernel::pit::init_pit();
 
-    // Create a new character style
     let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-
-    // Create a text at position (20, 30) and draw it using the previously defined style
     Text::new("Hello Rust!", Point::new(20, 30), style).draw(boot_info.screen);
 
     let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
@@ -67,16 +66,15 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
         CURR_THREAD_PTR = MAIN_THREAD as *mut ThreadControlBlock;
     }
 
-    let mut scheduler = Scheduler::new();
-
-    // spawn some threads
+    /* let mut scheduler = Scheduler::new();
     scheduler.spawn("Second thread", thread_func as *const ());
-
     loop {
         scheduler.lock();
         scheduler.schedule();
         scheduler.unlock();
-    }
+    } */
+
+    hlt_loop();
 }
 
 fn thread_func() {

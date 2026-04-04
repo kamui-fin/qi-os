@@ -1,6 +1,10 @@
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::AtomicUsize;
+
 use crate::hlt_loop;
 use crate::print;
 use crate::println;
+use crate::serial_print;
 use crate::serial_println;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -92,8 +96,12 @@ impl InterruptIndex {
     }
 }
 
+pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
+
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    print!(".");
+    // 1 ms passed by
+    ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());

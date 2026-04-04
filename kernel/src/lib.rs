@@ -9,6 +9,7 @@ pub mod gdt;
 pub mod graphics;
 pub mod interrupts;
 pub mod memory;
+pub mod pit;
 pub mod serial;
 pub mod task;
 pub mod thread;

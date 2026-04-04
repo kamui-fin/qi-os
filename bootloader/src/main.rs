@@ -195,7 +195,7 @@ pub extern "C" fn _start(screen: *const Screen) -> ! {
     }
 
     let kstack_top = stack_end_addr.align_down(16u8);
-    let kstack_bottom = stack_start.start_address();
+    let _kstack_bottom = stack_start.start_address();
 
     x86_64::instructions::tlb::flush_all();
 
