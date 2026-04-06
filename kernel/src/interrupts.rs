@@ -6,6 +6,11 @@ use crate::print;
 use crate::println;
 use crate::serial_print;
 use crate::serial_println;
+use crate::thread::BlockReason;
+use crate::thread::ThreadControlBlock;
+use crate::thread::ThreadState;
+use crate::thread::SCHEDULER;
+use alloc::boxed::Box;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
@@ -100,7 +105,25 @@ pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // 1 ms passed by
-    ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let curr_time = ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+
+    let mut scheduler = SCHEDULER.lock();
+
+    let mut to_wake = [0u64; 64];
+    let mut count = 0;
+
+    for thread in scheduler.threads.iter() {
+        if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
+            if expire_time <= curr_time {
+                to_wake[count] = thread.id;
+                count += 1;
+            }
+        }
+    }
+
+    for i in 0..count {
+        scheduler.unblock_task(to_wake[i]);
+    }
 
     unsafe {
         PICS.lock()

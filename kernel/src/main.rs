@@ -51,7 +51,7 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
     serial_println!("Qi OS booted up!\n");
     let boot_info = unsafe { &mut *boot_info };
     serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
-    
+
     kernel::pit::init_pit();
 
     let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);

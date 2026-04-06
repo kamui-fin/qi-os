@@ -1,18 +1,29 @@
 use alloc::vec;
-use core::{arch::asm, ptr::from_ref};
+use core::{
+    arch::asm,
+    cell::UnsafeCell,
+    ops::{Deref, DerefMut},
+    ptr::from_ref,
+    sync::atomic::AtomicUsize,
+};
 
+use crate::{interrupts::ELAPSED, serial_println};
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
+use lazy_static::lazy_static;
 use x86_64::{
     instructions::interrupts::without_interrupts,
     structures::paging::{FrameAllocator, Mapper, Page, PageSize, PageTableFlags, Size4KiB},
     VirtAddr,
 };
 
-use crate::serial_println;
+lazy_static! {
+    pub static ref SCHEDULER: IrqLock<Scheduler> = IrqLock::new(Scheduler::new());
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BlockReason {
     Paused,
+    Sleep(u64), // sleep expiry
 }
 
 #[repr(C)]
@@ -23,7 +34,7 @@ pub enum ThreadState {
     Blocked(BlockReason),
 }
 
-type ThreadId = &'static str;
+pub type ThreadId = u64;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -31,9 +42,8 @@ pub struct ThreadControlBlock {
     rsp: *const usize,
     rsp0: *const usize, // kernel stack pointer to use when entering kernel
     cr3: *const usize,
-    next_task: Option<*const ThreadControlBlock>,
-    state: ThreadState,
-    id: ThreadId,
+    pub state: ThreadState,
+    pub id: ThreadId,
     stack: Option<Box<[usize]>>,
     // parent_process_id: ProcessId
 }
@@ -42,7 +52,7 @@ const KERNEL_STACK_SIZE: usize = 256 * Size4KiB::SIZE as usize;
 
 impl ThreadControlBlock {
     // New kernel task
-    pub fn new(name: &'static str, return_address: *const ()) -> Self {
+    pub fn new(id: u64, return_address: *const ()) -> Self {
         let max_stack_len = KERNEL_STACK_SIZE / core::mem::size_of::<usize>();
         let mut stack: Box<[usize]> = vec![0usize; max_stack_len].into_boxed_slice();
 
@@ -71,8 +81,7 @@ impl ThreadControlBlock {
             rsp0,
             cr3,
             state: ThreadState::Ready,
-            id: name,
-            next_task: None,
+            id,
         }
     }
 
@@ -93,12 +102,14 @@ impl ThreadControlBlock {
             rsp: rsp,
             rsp0: rsp,
             cr3,
-            next_task: None,
             state: ThreadState::Running,
-            id: "KMAIN",
+            id: 0,
         }
     }
 }
+
+unsafe impl Send for ThreadControlBlock {}
+unsafe impl Sync for ThreadControlBlock {}
 
 /*
  Note that you can have a "task start up function" that is executed when a new task first gets CPU time and
@@ -114,31 +125,62 @@ extern "C" {
     pub fn switch_to_task(next_thread: *const ThreadControlBlock);
 }
 
-struct IrqLock {
-    counter: usize,
+pub struct IrqLock<T> {
+    counter: AtomicUsize,
+    data: UnsafeCell<T>,
 }
 
-impl IrqLock {
-    fn new() -> Self {
-        Self { counter: 0 }
+unsafe impl<T: Send> Sync for IrqLock<T> {}
+
+impl<T> IrqLock<T> {
+    fn new(data: T) -> Self {
+        Self {
+            counter: AtomicUsize::new(0),
+            data: UnsafeCell::new(data),
+        }
     }
 
-    fn lock(&mut self) {
+    pub fn lock(&self) -> IrqLockGuard<'_, T> {
         x86_64::instructions::interrupts::disable();
-        self.counter += 1;
-    }
+        self.counter
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
-    fn unlock(&mut self) {
-        self.counter -= 1;
-        if self.counter == 0 {
+        IrqLockGuard { lock: self }
+    }
+}
+
+pub struct IrqLockGuard<'a, T> {
+    lock: &'a IrqLock<T>,
+}
+
+impl<'a, T> Deref for IrqLockGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for IrqLockGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<'a, T> Drop for IrqLockGuard<'a, T> {
+    fn drop(&mut self) {
+        let prev = self
+            .lock
+            .counter
+            .fetch_sub(1, core::sync::atomic::Ordering::Release);
+        if prev == 1 {
             x86_64::instructions::interrupts::enable();
         }
     }
 }
 
 pub struct Scheduler {
-    threads: Vec<Box<ThreadControlBlock>>,
-    irq_lock: IrqLock,
+    pub threads: Vec<Box<ThreadControlBlock>>,
 }
 
 #[no_mangle]
@@ -149,16 +191,7 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             threads: Vec::with_capacity(5),
-            irq_lock: IrqLock::new(),
         }
-    }
-
-    pub fn lock(&mut self) {
-        self.irq_lock.lock();
-    }
-
-    pub fn unlock(&mut self) {
-        self.irq_lock.unlock();
     }
 
     pub fn schedule(&mut self) {
@@ -174,30 +207,49 @@ impl Scheduler {
         }
     }
 
-    pub fn spawn(&mut self, id: &'static str, return_addr: *const ()) {
+    pub fn spawn(&mut self, id: u64, return_addr: *const ()) {
         let new_thread = Box::new(ThreadControlBlock::new(id, return_addr));
         self.threads.push(new_thread);
     }
 
-    pub fn block_task(&mut self, reason: BlockReason) {
-        self.lock();
-        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
-        curr_thread.state = ThreadState::Blocked(reason);
-        self.schedule();
-        self.unlock();
+    pub fn unblock_task(&mut self, id: u64) {
+        let num_threads = self.threads.len();
+        let thread = self.threads.iter_mut().find(|t| t.id == id);
+        if let Some(thread) = thread {
+            thread.state = ThreadState::Ready;
+
+            // TODO: perhaps if there's only one thread running, we can pre-empt immediately?
+            // But then we can't easily call unblock within timer irq
+            // if num_threads <= 1 {
+            //     unsafe {
+            //         switch_to_task(&**thread as *const ThreadControlBlock);
+            //     }
+            // }
+        }
     }
+}
 
-    pub fn unblock_task(&mut self, thread: *mut ThreadControlBlock) {
-        self.lock();
+pub fn block_task(reason: BlockReason) {
+    let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+    curr_thread.state = ThreadState::Blocked(reason);
 
-        let thread = unsafe { &mut *thread };
-        thread.state = ThreadState::Ready;
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.schedule();
+}
 
-        // TODO: perhaps if there's only one thread running, we can pre-empt immediately?
-        self.schedule();
+fn get_time_since_boot() -> u64 {
+    ELAPSED.load(core::sync::atomic::Ordering::Relaxed) * 1_000_000
+}
 
-        self.unlock();
+fn nano_sleep(nano_sec: u64) {
+    nano_sleep_until(get_time_since_boot() + nano_sec);
+}
+
+fn nano_sleep_until(abs_time: u64) {
+    if abs_time <= get_time_since_boot() {
+        return;
     }
+    block_task(BlockReason::Sleep(abs_time));
 }
 
 // enter back into scheduler
