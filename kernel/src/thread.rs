@@ -7,7 +7,11 @@ use core::{
     sync::atomic::AtomicUsize,
 };
 
-use crate::{interrupts::ELAPSED, serial_println};
+use crate::{
+    interrupts::ELAPSED,
+    lock::{PreemptIrqLock, SimpleIrqLock, NEEDS_RESCHEDULE, PREEMPT_COUNT},
+    serial_println,
+};
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
 use lazy_static::lazy_static;
 use x86_64::{
@@ -17,13 +21,15 @@ use x86_64::{
 };
 
 lazy_static! {
-    pub static ref SCHEDULER: IrqLock<Scheduler> = IrqLock::new(Scheduler::new());
+    pub static ref SCHEDULER: SimpleIrqLock<Scheduler> = SimpleIrqLock::new(Scheduler::new());
+    pub static ref PREEMPT_DISABLE: PreemptIrqLock<()> = PreemptIrqLock::new(());
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BlockReason {
     Paused,
     Sleep(u64), // sleep expiry
+    Terminated,
 }
 
 #[repr(C)]
@@ -125,60 +131,6 @@ extern "C" {
     pub fn switch_to_task(next_thread: *const ThreadControlBlock);
 }
 
-pub struct IrqLock<T> {
-    counter: AtomicUsize,
-    data: UnsafeCell<T>,
-}
-
-unsafe impl<T: Send> Sync for IrqLock<T> {}
-
-impl<T> IrqLock<T> {
-    fn new(data: T) -> Self {
-        Self {
-            counter: AtomicUsize::new(0),
-            data: UnsafeCell::new(data),
-        }
-    }
-
-    pub fn lock(&self) -> IrqLockGuard<'_, T> {
-        x86_64::instructions::interrupts::disable();
-        self.counter
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-        IrqLockGuard { lock: self }
-    }
-}
-
-pub struct IrqLockGuard<'a, T> {
-    lock: &'a IrqLock<T>,
-}
-
-impl<'a, T> Deref for IrqLockGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
-    }
-}
-
-impl<'a, T> DerefMut for IrqLockGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
-    }
-}
-
-impl<'a, T> Drop for IrqLockGuard<'a, T> {
-    fn drop(&mut self) {
-        let prev = self
-            .lock
-            .counter
-            .fetch_sub(1, core::sync::atomic::Ordering::Release);
-        if prev == 1 {
-            x86_64::instructions::interrupts::enable();
-        }
-    }
-}
-
 pub struct Scheduler {
     pub threads: Vec<Box<ThreadControlBlock>>,
 }
@@ -195,6 +147,12 @@ impl Scheduler {
     }
 
     pub fn schedule(&mut self) {
+        // TODO: for safety, create a wrapper around switch_to_task and add this too
+        // TODO: idle task must have LOWEST priority
+        if PREEMPT_COUNT.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+            NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
         let next_thread = self
             .threads
             .iter_mut()
@@ -213,18 +171,21 @@ impl Scheduler {
     }
 
     pub fn unblock_task(&mut self, id: u64) {
+        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
         let num_threads = self.threads.len();
         let thread = self.threads.iter_mut().find(|t| t.id == id);
+        let mut should_preempt = false;
         if let Some(thread) = thread {
             thread.state = ThreadState::Ready;
 
-            // TODO: perhaps if there's only one thread running, we can pre-empt immediately?
-            // But then we can't easily call unblock within timer irq
-            // if num_threads <= 1 {
-            //     unsafe {
-            //         switch_to_task(&**thread as *const ThreadControlBlock);
-            //     }
-            // }
+            // If we're currently running idle task OR there's literally no other threads
+            if num_threads == 0 || curr_thread.id == 1 {
+                should_preempt = true;
+            }
+        }
+
+        if should_preempt {
+            self.schedule();
         }
     }
 }
@@ -246,50 +207,59 @@ fn nano_sleep(nano_sec: u64) {
 }
 
 fn nano_sleep_until(abs_time: u64) {
+    // just get a guard to prevent a sudden context switch after if statement which might
+    // invalidate time contract
+    let _guard = PREEMPT_DISABLE.lock();
     if abs_time <= get_time_since_boot() {
         return;
     }
     block_task(BlockReason::Sleep(abs_time));
 }
 
-// enter back into scheduler
-// TODO: figure out a way without all these globals
-pub fn sched() {
+fn terminate_task() {
+    let _guard = PREEMPT_DISABLE.lock();
+
+    block_task(BlockReason::Terminated);
+
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.unblock_task(2); // 2 is cleaner task
+}
+
+/* thread_control_block *terminated_task_list = NULL;
+
+void terminate_task(void) {
+
+    // Note: Can do any harmless stuff here (close files, free memory in user-space, ...) but there's none of that yet
+
+    lock_stuff();
+
+    // Put this task on the terminated task list
+
+    lock_scheduler();
+    current_task_TCB->next = terminated_task_list;
+    terminated_task_list = current_task_TCB;
+    unlock_scheduler();
+
+    // Block this task (note: task switch will be postponed until scheduler lock is released)
+
+    block_task(TERMINATED);
+
+    // Make sure the cleaner task isn't paused
+
+    unblock_task(cleaner_task);
+
+    // Unlock the scheduler's lock
+
+    unlock_stuff();
+}
+ */
+
+pub fn yield_sched() {
     unsafe {
         let curr_thread = &mut *CURR_THREAD_PTR;
         curr_thread.state = ThreadState::Ready;
-        switch_to_task(MAIN_THREAD);
+
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.schedule();
     }
 }
-
-/*
-   for(;;) {
-        lock_scheduler();
-        schedule();
-        unlock_scheduler();
-    }
-}
-
-void block_task(int reason) {
-    lock_scheduler();
-    current_task_TCB->state = reason;
-    schedule();
-    unlock_scheduler();
-}
-
-void unblock_task(thread_control_block * task) {
-    lock_scheduler();
-    if(first_ready_to_run_task == NULL) {
-
-        // Only one task was running before, so pre-empt
-
-        switch_to_task(task);
-    } else {
-        // There's at least one task on the "ready to run" queue already, so don't pre-empt
-
-        last_ready_to_run_task->next = task;
-        last_ready_to_run_task = task;
-    }
-    unlock_scheduler();
-}
-*/

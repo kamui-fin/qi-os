@@ -18,7 +18,7 @@ use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::Task;
 use kernel::thread::{
-    sched, switch_to_task, Scheduler, ThreadControlBlock, CURR_THREAD_PTR, MAIN_THREAD,
+    sched, switch_to_task, Scheduler, ThreadControlBlock, CURR_THREAD_PTR, MAIN_THREAD, SCHEDULER,
 };
 use kernel::{allocator, hlt_loop, init, memory, println, serial, serial_println};
 use x86_64::instructions::interrupts::without_interrupts;
@@ -66,6 +66,10 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
         CURR_THREAD_PTR = MAIN_THREAD as *mut ThreadControlBlock;
     }
 
+    // idle tasks always have ID 1
+    let idle_task = Box::new(ThreadControlBlock::new(1, hlt_loop as *const ()));
+    let cleaner_task = Box::new(ThreadControlBlock::new(2, cleaner_task as *const ()));
+
     /* let mut scheduler = Scheduler::new();
     scheduler.spawn("Second thread", thread_func as *const ());
     loop {
@@ -76,6 +80,34 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
 
     hlt_loop();
 }
+
+fn cleaner_task() {
+    loop {
+        let scheduler = SCHEDULER.lock();
+        // TODO: 
+    }
+}
+/*
+* void cleaner_task(void) {
+    thread_control_block *task;
+
+    lock_stuff();
+
+    while(terminated_task_list != NULL) {
+        task = terminated_task_list;
+        terminated_task_list = task->next;
+        cleanup_terminated_task(task);
+    }
+
+    block_task(PAUSED);
+    unlock_stuff();
+}
+
+void cleanup_terminated_task(thread_control_block * task) {
+        kfree(task->kernel_stack_top - KERNEL_STACK_SIZE);
+        kfree(task);
+}
+*/
 
 fn thread_func() {
     loop {

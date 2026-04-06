@@ -9,6 +9,7 @@ use crate::serial_println;
 use crate::thread::BlockReason;
 use crate::thread::ThreadControlBlock;
 use crate::thread::ThreadState;
+use crate::thread::PREEMPT_DISABLE;
 use crate::thread::SCHEDULER;
 use alloc::boxed::Box;
 use x86_64::structures::idt::PageFaultErrorCode;
@@ -106,23 +107,29 @@ pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // 1 ms passed by
     let curr_time = ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let curr_time_ns = curr_time * 1_000_000;
 
-    let mut scheduler = SCHEDULER.lock();
+    let _guard = PREEMPT_DISABLE.lock();
 
-    let mut to_wake = [0u64; 64];
-    let mut count = 0;
-
-    for thread in scheduler.threads.iter() {
-        if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
-            if expire_time <= curr_time {
-                to_wake[count] = thread.id;
-                count += 1;
+    {
+        let mut scheduler = SCHEDULER.lock();
+        let mut to_wake = [0u64; 64];
+        let mut count = 0;
+        for thread in scheduler.threads.iter() {
+            if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
+                if expire_time <= curr_time_ns {
+                    to_wake[count] = thread.id;
+                    count += 1;
+                }
             }
         }
-    }
+        for i in 0..count {
+            scheduler.unblock_task(to_wake[i]);
+        }
 
-    for i in 0..count {
-        scheduler.unblock_task(to_wake[i]);
+        if curr_time.is_multiple_of(10) {
+            scheduler.schedule();
+        }
     }
 
     unsafe {
