@@ -8,8 +8,8 @@ use core::{
 };
 
 use crate::{
-    interrupts::ELAPSED,
-    lock::{PreemptIrqLock, SimpleIrqLock, NEEDS_RESCHEDULE, PREEMPT_COUNT},
+    interrupts::{ELAPSED, TIME_SLICE},
+    lock::{PreemptIrqLock, SimpleIrqLock, IRQ_DISABLE_COUNTER, NEEDS_RESCHEDULE, PREEMPT_COUNT},
     serial_println,
 };
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
@@ -51,7 +51,7 @@ pub struct ThreadControlBlock {
     pub state: ThreadState,
     pub id: ThreadId,
     stack: Option<Box<[usize]>>,
-    // parent_process_id: ProcessId
+    pub time_slice_remaining: usize, // resets to 100 ms upon context switch
 }
 
 const KERNEL_STACK_SIZE: usize = 256 * Size4KiB::SIZE as usize;
@@ -87,6 +87,7 @@ impl ThreadControlBlock {
             rsp0,
             cr3,
             state: ThreadState::Ready,
+            time_slice_remaining: TIME_SLICE,
             id,
         }
     }
@@ -109,7 +110,8 @@ impl ThreadControlBlock {
             rsp0: rsp,
             cr3,
             state: ThreadState::Running,
-            id: 0,
+            time_slice_remaining: TIME_SLICE,
+            id: 1,
         }
     }
 }
@@ -133,133 +135,143 @@ extern "C" {
 
 pub struct Scheduler {
     pub threads: Vec<Box<ThreadControlBlock>>,
+    pub ready_queue: VecDeque<ThreadId>,
 }
 
 #[no_mangle]
 pub static mut CURR_THREAD_PTR: *mut ThreadControlBlock = core::ptr::null_mut();
 pub static mut MAIN_THREAD: *mut ThreadControlBlock = core::ptr::null_mut();
 
+static MAX_TASKS: usize = 15;
+
 impl Scheduler {
     pub fn new() -> Self {
         Self {
-            threads: Vec::with_capacity(5),
+            threads: Vec::with_capacity(MAX_TASKS),
+            ready_queue: VecDeque::with_capacity(MAX_TASKS),
         }
     }
 
-    pub fn schedule(&mut self) {
-        // TODO: for safety, create a wrapper around switch_to_task and add this too
+    pub fn schedule(&mut self) -> Option<*mut ThreadControlBlock> {
         // TODO: idle task must have LOWEST priority
-        if PREEMPT_COUNT.load(core::sync::atomic::Ordering::Relaxed) != 0 {
-            NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::Relaxed);
-            return;
-        }
         let next_thread = self
             .threads
             .iter_mut()
             .find(|t| t.state == ThreadState::Ready);
         if let Some(next_thread) = next_thread {
-            next_thread.state = ThreadState::Running;
-            unsafe {
-                switch_to_task(&**next_thread as *const ThreadControlBlock);
-            }
+            Some(&mut **next_thread as *mut ThreadControlBlock)
+        } else {
+            None
         }
     }
 
-    pub fn spawn(&mut self, id: u64, return_addr: *const ()) {
+    pub fn spawn(&mut self, id: ThreadId, return_addr: *const ()) {
         let new_thread = Box::new(ThreadControlBlock::new(id, return_addr));
         self.threads.push(new_thread);
+
+        if id > 2 {
+            self.ready_queue.push_back(id);
+        }
     }
 
-    pub fn unblock_task(&mut self, id: u64) {
+    pub fn unblock_task(&mut self, id: ThreadId) {
         let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
         let num_threads = self.threads.len();
         let thread = self.threads.iter_mut().find(|t| t.id == id);
-        let mut should_preempt = false;
         if let Some(thread) = thread {
             thread.state = ThreadState::Ready;
+            self.ready_queue.push_back(id);
 
             // If we're currently running idle task OR there's literally no other threads
             if num_threads == 0 || curr_thread.id == 1 {
-                should_preempt = true;
+                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
             }
         }
+    }
+}
 
-        if should_preempt {
-            self.schedule();
+pub fn switch_if_needed() {
+    let preempt_count = PREEMPT_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+    let needs_schedule = NEEDS_RESCHEDULE.load(core::sync::atomic::Ordering::SeqCst);
+
+    if !needs_schedule {
+        return;
+    }
+
+    if preempt_count > 0 {
+        NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+
+    // this should never happen!!
+    let irq_count = IRQ_DISABLE_COUNTER.load(core::sync::atomic::Ordering::Relaxed);
+    if irq_count > 0 {
+        panic!("BUG: scheduling while atomic!");
+    }
+
+    // clear flag
+    NEEDS_RESCHEDULE.store(false, core::sync::atomic::Ordering::SeqCst);
+    let next_thread = {
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.schedule()
+    };
+
+    if let Some(next_thread) = next_thread {
+        unsafe {
+            (*next_thread).state = ThreadState::Running;
+            switch_to_task(next_thread);
         }
     }
 }
 
 pub fn block_task(reason: BlockReason) {
-    let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
-    curr_thread.state = ThreadState::Blocked(reason);
+    {
+        let _guard = SCHEDULER.lock();
 
-    let mut scheduler = SCHEDULER.lock();
-    scheduler.schedule();
+        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        curr_thread.state = ThreadState::Blocked(reason);
+        curr_thread.time_slice_remaining = TIME_SLICE;
+
+        NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    switch_if_needed();
 }
 
-fn get_time_since_boot() -> u64 {
+pub fn get_time_since_boot() -> u64 {
     ELAPSED.load(core::sync::atomic::Ordering::Relaxed) * 1_000_000
 }
 
-fn nano_sleep(nano_sec: u64) {
+pub fn nano_sleep(nano_sec: u64) {
     nano_sleep_until(get_time_since_boot() + nano_sec);
 }
 
 fn nano_sleep_until(abs_time: u64) {
-    // just get a guard to prevent a sudden context switch after if statement which might
-    // invalidate time contract
-    let _guard = PREEMPT_DISABLE.lock();
     if abs_time <= get_time_since_boot() {
         return;
     }
     block_task(BlockReason::Sleep(abs_time));
 }
 
-fn terminate_task() {
-    let _guard = PREEMPT_DISABLE.lock();
+pub fn terminate_task() {
+    {
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.unblock_task(2); // 2 is cleaner task
+    }
 
     block_task(BlockReason::Terminated);
-
-    let mut scheduler = SCHEDULER.lock();
-    scheduler.unblock_task(2); // 2 is cleaner task
 }
-
-/* thread_control_block *terminated_task_list = NULL;
-
-void terminate_task(void) {
-
-    // Note: Can do any harmless stuff here (close files, free memory in user-space, ...) but there's none of that yet
-
-    lock_stuff();
-
-    // Put this task on the terminated task list
-
-    lock_scheduler();
-    current_task_TCB->next = terminated_task_list;
-    terminated_task_list = current_task_TCB;
-    unlock_scheduler();
-
-    // Block this task (note: task switch will be postponed until scheduler lock is released)
-
-    block_task(TERMINATED);
-
-    // Make sure the cleaner task isn't paused
-
-    unblock_task(cleaner_task);
-
-    // Unlock the scheduler's lock
-
-    unlock_stuff();
-}
- */
 
 pub fn yield_sched() {
-    unsafe {
-        let curr_thread = &mut *CURR_THREAD_PTR;
-        curr_thread.state = ThreadState::Ready;
+    {
+        let _guard = SCHEDULER.lock();
 
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.schedule();
+        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        curr_thread.state = ThreadState::Ready;
+        curr_thread.time_slice_remaining = TIME_SLICE;
+
+        NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
     }
+
+    switch_if_needed();
 }

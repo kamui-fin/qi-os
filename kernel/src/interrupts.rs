@@ -2,13 +2,16 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 
 use crate::hlt_loop;
+use crate::lock::NEEDS_RESCHEDULE;
 use crate::print;
 use crate::println;
 use crate::serial_print;
 use crate::serial_println;
+use crate::thread::switch_if_needed;
 use crate::thread::BlockReason;
 use crate::thread::ThreadControlBlock;
 use crate::thread::ThreadState;
+use crate::thread::CURR_THREAD_PTR;
 use crate::thread::PREEMPT_DISABLE;
 use crate::thread::SCHEDULER;
 use alloc::boxed::Box;
@@ -103,15 +106,17 @@ impl InterruptIndex {
 }
 
 pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
+pub const TIME_SLICE: usize = 100 * 1_000_000;
+pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     // 1 ms passed by
     let curr_time = ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     let curr_time_ns = curr_time * 1_000_000;
 
-    let _guard = PREEMPT_DISABLE.lock();
-
     {
+        let _guard = PREEMPT_DISABLE.lock();
+
         let mut scheduler = SCHEDULER.lock();
         let mut to_wake = [0u64; 64];
         let mut count = 0;
@@ -127,8 +132,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
             scheduler.unblock_task(to_wake[i]);
         }
 
-        if curr_time.is_multiple_of(10) {
-            scheduler.schedule();
+        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        if curr_thread.id != 1 {
+            if curr_thread.time_slice_remaining <= TIME_BETWEEN_TICKS {
+                curr_thread.time_slice_remaining = TIME_SLICE;
+
+                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+            } else {
+                curr_thread.time_slice_remaining -= TIME_BETWEEN_TICKS;
+            }
         }
     }
 
@@ -136,6 +148,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+
+    switch_if_needed();
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
