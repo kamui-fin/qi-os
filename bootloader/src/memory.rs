@@ -1,5 +1,6 @@
 use x86_64::{
-    PhysAddr, structures::paging::{FrameAllocator, PhysFrame, Size4KiB, frame::PhysFrameRangeInclusive}
+    structures::paging::{frame::PhysFrameRangeInclusive, FrameAllocator, PhysFrame, Size4KiB},
+    PhysAddr,
 };
 
 #[repr(C)]

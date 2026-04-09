@@ -1,6 +1,6 @@
 use alloc::vec;
 use core::{
-    arch::asm,
+    arch::{asm, naked_asm},
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
     ptr::from_ref,
@@ -9,7 +9,7 @@ use core::{
 
 use crate::{
     interrupts::{ELAPSED, TIME_SLICE},
-    lock::{PreemptIrqLock, SimpleIrqLock, IRQ_DISABLE_COUNTER, NEEDS_RESCHEDULE, PREEMPT_COUNT},
+    lock::{SimpleIrqLock, IRQ_DISABLE_COUNTER, NEEDS_RESCHEDULE},
     serial_println,
 };
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
@@ -22,7 +22,6 @@ use x86_64::{
 
 lazy_static! {
     pub static ref SCHEDULER: SimpleIrqLock<Scheduler> = SimpleIrqLock::new(Scheduler::new());
-    pub static ref PREEMPT_DISABLE: PreemptIrqLock<()> = PreemptIrqLock::new(());
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -54,7 +53,17 @@ pub struct ThreadControlBlock {
     pub time_slice_remaining: usize, // resets to 100 ms upon context switch
 }
 
-const KERNEL_STACK_SIZE: usize = 256 * Size4KiB::SIZE as usize;
+const KERNEL_STACK_SIZE: usize = 1 * Size4KiB::SIZE as usize;
+
+#[unsafe(naked)]
+pub unsafe extern "C" fn task_startup_hook() {
+    naked_asm!(
+        "sti",
+        "call r12",
+        /* "call {terminate}",
+        terminate = sym crate::thread::terminate_task, */
+    );
+}
 
 impl ThreadControlBlock {
     // New kernel task
@@ -62,15 +71,15 @@ impl ThreadControlBlock {
         let max_stack_len = KERNEL_STACK_SIZE / core::mem::size_of::<usize>();
         let mut stack: Box<[usize]> = vec![0usize; max_stack_len].into_boxed_slice();
 
-        stack[max_stack_len - 8] = 0; // rbx
-        stack[max_stack_len - 7] = 0; // rbp
-        stack[max_stack_len - 6] = 0; // r12
-        stack[max_stack_len - 5] = 0; // r13
-        stack[max_stack_len - 4] = 0; // r14
-        stack[max_stack_len - 3] = 0; // r15
-        stack[max_stack_len - 2] = return_address as usize;
+        stack[max_stack_len - 8] = 0; // r15
+        stack[max_stack_len - 7] = 0; // r14
+        stack[max_stack_len - 6] = 0; // r13
+        stack[max_stack_len - 5] = return_address as usize; // r12
+        stack[max_stack_len - 4] = 0; // rbp
+        stack[max_stack_len - 3] = 0; // rbx
+        stack[max_stack_len - 2] = (task_startup_hook as *const ()).addr(); // actual return addr
 
-        let rsp = from_ref(&stack[max_stack_len - 6]);
+        let rsp = from_ref(&stack[max_stack_len - 8]);
         let rsp0 = from_ref(&stack[max_stack_len - 1]);
 
         // TODO: currently assume all threads are in kernel space
@@ -152,16 +161,19 @@ impl Scheduler {
         }
     }
 
-    pub fn schedule(&mut self) -> Option<*mut ThreadControlBlock> {
-        // TODO: idle task must have LOWEST priority
-        let next_thread = self
-            .threads
-            .iter_mut()
-            .find(|t| t.state == ThreadState::Ready);
-        if let Some(next_thread) = next_thread {
+    pub fn pick_next_thread(&mut self) -> Option<*mut ThreadControlBlock> {
+        if let Some(next_id) = self.ready_queue.pop_front() {
+            let next_thread = self
+                .threads
+                .iter_mut()
+                .find(|t| t.id == next_id)
+                .expect("thread not found");
+            next_thread.state = ThreadState::Running;
             Some(&mut **next_thread as *mut ThreadControlBlock)
         } else {
-            None
+            let idle_thread = unsafe { &mut *MAIN_THREAD };
+            idle_thread.state = ThreadState::Running;
+            Some(idle_thread)
         }
     }
 
@@ -191,15 +203,9 @@ impl Scheduler {
 }
 
 pub fn switch_if_needed() {
-    let preempt_count = PREEMPT_COUNT.load(core::sync::atomic::Ordering::SeqCst);
     let needs_schedule = NEEDS_RESCHEDULE.load(core::sync::atomic::Ordering::SeqCst);
 
     if !needs_schedule {
-        return;
-    }
-
-    if preempt_count > 0 {
-        NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
         return;
     }
 
@@ -213,12 +219,11 @@ pub fn switch_if_needed() {
     NEEDS_RESCHEDULE.store(false, core::sync::atomic::Ordering::SeqCst);
     let next_thread = {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.schedule()
+        scheduler.pick_next_thread()
     };
 
     if let Some(next_thread) = next_thread {
         unsafe {
-            (*next_thread).state = ThreadState::Running;
             switch_to_task(next_thread);
         }
     }
@@ -264,11 +269,13 @@ pub fn terminate_task() {
 
 pub fn yield_sched() {
     {
-        let _guard = SCHEDULER.lock();
+        let mut scheduler = SCHEDULER.lock();
 
         let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
         curr_thread.state = ThreadState::Ready;
         curr_thread.time_slice_remaining = TIME_SLICE;
+
+        scheduler.ready_queue.push_back(curr_thread.id);
 
         NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
     }

@@ -12,7 +12,6 @@ use crate::thread::BlockReason;
 use crate::thread::ThreadControlBlock;
 use crate::thread::ThreadState;
 use crate::thread::CURR_THREAD_PTR;
-use crate::thread::PREEMPT_DISABLE;
 use crate::thread::SCHEDULER;
 use alloc::boxed::Box;
 use x86_64::structures::idt::PageFaultErrorCode;
@@ -115,10 +114,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     let curr_time_ns = curr_time * 1_000_000;
 
     {
-        let _guard = PREEMPT_DISABLE.lock();
-
         let mut scheduler = SCHEDULER.lock();
-        let mut to_wake = [0u64; 64];
+        let mut to_wake = [0u64; 15];
         let mut count = 0;
         for thread in scheduler.threads.iter() {
             if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
@@ -136,10 +133,15 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         if curr_thread.id != 1 {
             if curr_thread.time_slice_remaining <= TIME_BETWEEN_TICKS {
                 curr_thread.time_slice_remaining = TIME_SLICE;
-
+                curr_thread.state = ThreadState::Ready;
+                scheduler.ready_queue.push_back(curr_thread.id);
                 NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
             } else {
                 curr_thread.time_slice_remaining -= TIME_BETWEEN_TICKS;
+            }
+        } else {
+            if !scheduler.ready_queue.is_empty() {
+                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
             }
         }
     }

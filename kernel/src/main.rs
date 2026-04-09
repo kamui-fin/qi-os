@@ -19,10 +19,12 @@ use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::Task;
 use kernel::thread::{
-    block_task, switch_to_task, terminate_task, yield_sched, BlockReason, Scheduler,
-    ThreadControlBlock, ThreadState, CURR_THREAD_PTR, MAIN_THREAD, SCHEDULER,
+    block_task, switch_if_needed, switch_to_task, terminate_task, yield_sched, BlockReason,
+    Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR, MAIN_THREAD, SCHEDULER,
 };
-use kernel::{allocator, hlt_loop, init, memory, println, serial, serial_println};
+use kernel::{
+    allocator, hlt_loop, init, memory, println, serial, serial_print, serial_println, BootInfo,
+};
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -35,45 +37,60 @@ use x86_64::{PhysAddr, VirtAddr};
 
 extern crate alloc;
 
-/// Start address of the first frame that is not part of the lower 1MB of frames
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct BootInfo<'a> {
-    screen: &'a mut Screen,
-    allocator: BootInfoFrameAllocator,
-    page_table: OffsetPageTable<'a>,
-    physical_memory_offset: u64,
-}
-
 #[no_mangle]
 pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
     init();
 
-    serial_println!("Qi OS booted up!\n");
     let boot_info = unsafe { &mut *boot_info };
-    serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
-
-    kernel::pit::init_pit();
-
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    Text::new("Hello Rust!", Point::new(20, 30), style).draw(boot_info.screen);
 
     let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
     allocator::init_heap(&mut mapper, &mut boot_info.allocator)
         .expect("heap initialization failed");
 
+    serial_println!("Qi OS booted up!\n");
+    serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
+
+    kernel::pit::init_pit();
+
     unsafe {
         MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
-        CURR_THREAD_PTR = MAIN_THREAD as *mut ThreadControlBlock;
+        CURR_THREAD_PTR = MAIN_THREAD;
     }
 
     {
         let mut scheduler = SCHEDULER.lock();
         scheduler.spawn(2, cleaner_task as *const ());
+        scheduler.spawn(3, burn_a as *const ());
+        scheduler.spawn(4, burn_b as *const ());
     }
 
+    x86_64::instructions::interrupts::enable();
+
+    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    Text::new("Hello Rust!", Point::new(20, 30), style)
+        .draw(boot_info.screen)
+        .unwrap();
+
     hlt_loop();
+}
+
+fn burn_a() {
+    loop {
+        serial_print!("A");
+        // Do some dummy math to slow down the printing slightly
+        for _ in 0..100000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+fn burn_b() {
+    loop {
+        serial_print!("B");
+        for _ in 0..100000 {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 fn cleaner_task() {

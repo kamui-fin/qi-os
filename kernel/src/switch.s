@@ -23,25 +23,26 @@ switch_to_task:
     push r14
     push r15
 
-    mov rax, [rip+CURR_THREAD_PTR]    # edi = address of the previous task's "thread control block"
-    mov [rax+0], rsp        # Save rsp for previous task's kernel stack in the thread's TCB
+    # save old task's rsp
+    mov rax, [rip+CURR_THREAD_PTR]
+    mov [rax+0], rsp
 
-    # Load next task's state
+    # point CURR_THREAD_PTR to new task
+    mov [rip+CURR_THREAD_PTR], rdi
 
-    mov rsi, [rsp+8]         # rsi = address of the next task's "thread control block" (parameter passed on stack)
-    mov [rip+CURR_THREAD_PTR], rsi    # Current task's TCB is the next task TCB
-
-    mov rsp, [rsi+0]         # Load rsp for next task's kernel stack from the thread's TCB
-    mov rbx, [rsi+(1*8)]        # ebx = address for the top of the next task's kernel stack
-    mov rax, [rsi+(2*8)]         # eax = address of page directory for next task
+    
+    # switch stacks
+    mov rsp, [rdi+0]      
+    mov rbx, [rdi+(1*8)] 
+    mov rax, [rdi+(2*8)]
 
     mov rdx, [rip+TSS_POINTER]
-    mov [rdx+4], rbx            # Adjust the rsp0 field in the TSS (used by CPU for for CPL=3 -> CPL=0 privilege level changes)
+    mov [rdx+4], rbx           
 
-    mov rcx, cr3                   # ecx = previous task's virtual address space
-    cmp rax, rcx                   # Does the virtual address space need to being changed?
-    je .doneVAS                   # no, virtual address space is the same, so don't reload it and cause TLB flushes
-    mov cr3, rax                   # yes, load the next task's virtual address space
+    mov rcx, cr3              
+    cmp rax, rcx             
+    je .doneVAS             
+    mov cr3, rax           
 
 
 .doneVAS:
@@ -52,4 +53,4 @@ switch_to_task:
     pop rbp
     pop rbx
 
-    ret                           # Load next task's EIP from its kernel stack
+    ret                           # Load next task's RIP from its kernel stack
