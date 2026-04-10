@@ -1,10 +1,6 @@
-The beginning of something big.
+_**The beginning of something big.**_
 
 # TODO
-
-### Cannon Logic
-
-    [ ] Can only jump when one piece is between it and enemy piece.
 
 ### Checkmate Logic
     
