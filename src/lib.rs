@@ -6,10 +6,9 @@ use alloc::{
     vec::Vec,
 };
 
-mod board;
-mod moves;
-mod piece;
-mod position;
+pub mod board;
+pub mod piece;
+pub mod position;
 
 
 pub const RED: Color = Color::Red;
@@ -21,20 +20,6 @@ pub const BLACK: Color = Color::Black;
 pub enum Color{
     Red,
     Black,
-}
-
-
-impl core::fmt::Display for Color {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> Result<(), core::fmt::Error> {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Red => "Red",
-                Self::Black => "Black",
-            }
-        )
-    }
 }
 
 /// A color can be inverted using the `!` operator.
