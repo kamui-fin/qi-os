@@ -29,7 +29,6 @@ switch_to_task:
 
     # point CURR_THREAD_PTR to new task
     mov [rip+CURR_THREAD_PTR], rdi
-
     
     # switch stacks
     mov rsp, [rdi+0]      

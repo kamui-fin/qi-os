@@ -4,6 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::task;
+use conquer_once::doc::OnceCell;
 use core::arch::asm;
 use core::panic::PanicInfo;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -19,12 +20,15 @@ use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::Task;
 use kernel::thread::{
-    block_task, switch_if_needed, switch_to_task, terminate_task, yield_sched, BlockReason,
-    Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR, MAIN_THREAD, SCHEDULER,
+    block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
+    yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
+    MAIN_THREAD, SCHEDULER,
 };
 use kernel::{
     allocator, hlt_loop, init, memory, println, serial, serial_print, serial_println, BootInfo,
+    BOOT_INFO,
 };
+use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -38,10 +42,13 @@ use x86_64::{PhysAddr, VirtAddr};
 extern crate alloc;
 
 #[no_mangle]
-pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
+pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
     init();
 
-    let boot_info = unsafe { &mut *boot_info };
+    let boot_info: &'static mut BootInfo = unsafe { &mut *boot_info };
+    BOOT_INFO.init_once(|| Mutex::new(boot_info));
+
+    let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
 
     let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
     allocator::init_heap(&mut mapper, &mut boot_info.allocator)
@@ -57,13 +64,6 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
         CURR_THREAD_PTR = MAIN_THREAD;
     }
 
-    {
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn(2, cleaner_task as *const ());
-        scheduler.spawn(3, burn_a as *const ());
-        scheduler.spawn(4, burn_b as *const ());
-    }
-
     x86_64::instructions::interrupts::enable();
 
     let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
@@ -71,24 +71,42 @@ pub extern "C" fn _start(boot_info: *mut BootInfo) -> ! {
         .draw(boot_info.screen)
         .unwrap();
 
+    {
+        let mut scheduler = SCHEDULER.lock();
+        scheduler.spawn(2, cleaner_task as *const ());
+        scheduler.spawn(3, task_a as *const ());
+        scheduler.spawn(4, task_b as *const ());
+    }
+
+    // test sleep & terminate
     hlt_loop();
 }
 
-fn burn_a() {
+fn task_a() {
     loop {
-        serial_print!("A");
-        // Do some dummy math to slow down the printing slightly
-        for _ in 0..100000 {
-            core::hint::spin_loop();
+        for i in 0..10000 {
+            serial_println!(
+                "[task A] Counter: {} at {}",
+                i + 1,
+                get_time_since_boot() / 1_000_000
+            );
+            nano_sleep(1000 * 1_000_000);
         }
     }
 }
 
-fn burn_b() {
+fn task_b() {
     loop {
-        serial_print!("B");
-        for _ in 0..100000 {
-            core::hint::spin_loop();
+        for i in 0..10000 {
+            if i == 10 {
+                terminate_task();
+            }
+            serial_println!(
+                "[task B] Counter: {} at {}",
+                i + 1,
+                get_time_since_boot() / 1_000_000
+            );
+            nano_sleep(1000 * 1_000_000);
         }
     }
 }

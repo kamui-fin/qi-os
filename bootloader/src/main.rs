@@ -6,6 +6,7 @@ use core::panic::PanicInfo;
 
 use x86_64::{
     structures::paging::{
+        frame::{PhysFrameRange, PhysFrameRangeInclusive},
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size2MiB, Size4KiB,
     },
@@ -42,6 +43,8 @@ pub struct BootInfo<'a> {
     allocator: BootInfoFrameAllocator,
     page_table: OffsetPageTable<'a>,
     physical_memory_offset: u64,
+    kernel_base_virt: VirtAddr,
+    kernel_frame_range: PhysFrameRangeInclusive<Size2MiB>,
 }
 
 #[no_mangle]
@@ -204,6 +207,8 @@ pub extern "C" fn _start(screen: *const Screen) -> ! {
         allocator: frame_allocator,
         page_table: kernel_page_table,
         physical_memory_offset: phys_mem_offset.as_u64(),
+        kernel_base_virt,
+        kernel_frame_range,
     };
 
     serial_println!("Finished mapping everything.");
