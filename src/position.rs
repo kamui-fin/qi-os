@@ -9,6 +9,7 @@ pub struct Position {
 } 
 
 impl Position {
+
     #[inline]
     pub const fn new(row: i8, col: i8) -> Self {
         Self { row, col }
@@ -73,7 +74,6 @@ impl Position {
             Color::Black => self.col >=3 && self.col <= 5 && self.row >=7 && self.row <= 9,
         }
     }
-    
     //above and below change based on which side is moving, grid does not change 
     pub fn pawn_up(&self, ally_color: Color) -> Self {
         match ally_color {
@@ -117,7 +117,7 @@ impl Position {
 
     pub fn is_diagonal_to(&self, other: Self) -> bool {
         // | x1 - x2 | = | y1 - y2 |
-        ((self.col - other.col).abs() == (self.row - other.row).abs())
+        (self.col - other.col).abs() == (self.row - other.row).abs()
     }
 
     pub fn orthogonal_distance(&self, new_pos: Self) -> i8 {
@@ -130,7 +130,7 @@ impl Position {
 
     // could just use orthogonal_distance but would have an unnecessary check, distance will the same for cols or rows
     pub fn diagonal_distance(&self, new_pos: Self) -> i8 {
-        (self.col - new_pos.col).abs
+        (self.col - new_pos.col).abs()
     }
 
     // orthogonal - horizontal and vertical

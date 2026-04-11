@@ -29,33 +29,50 @@ impl Piece {
     }
 
 
-
     pub fn is_legal_move(&self, new_pos: Position, board: &Board) -> bool {
         // rule these out first as postion helpers don't check for legality
         if board.has_ally_piece(new_pos, self.color) || new_pos.is_off_board(){
             return false
         }
+
         match self.piece_type {
              PieceType::General => {
+                let traveling: Vec<Position>;
+                match self.color {
+                    Color::Red => {
+                        traveling = new_pos.orthogonals_to(Position::new(9, new_pos.get_col())); 
+                    }
+                    Color::Black => {
+                        traveling = new_pos.orthogonals_to(Position::new(0, new_pos.get_col()));
+                    }
+                }
+                
+                for point in traveling.iter() {
+                    if board.has_piece(*point) {
+                        if board.type_at_pos(*point) == PieceType::General {
+                            return false
+                        } else {break}
+                    }
+                }
                 let up = self.pos.pawn_up(self.color);
                 let down = self.pos.pawn_down(self.color);
                 let right = self.pos.next_right();
                 let left = self.pos.next_left();
-
                 if board.postions_match(new_pos, up) 
                 || board.postions_match(new_pos, down) 
                 || board.postions_match(new_pos, right) 
                 || board.postions_match(new_pos, left) {
                     return true
-                }
-                else {false}
+                } else {return false}
             }
+
              PieceType::Pawn => {
                 let up = self.pos.pawn_up(self.color);
-                let right = self.pos.next_right();
-                let left = self.pos.next_left();
 
                 if self.pos.is_past_river(self.color)  {
+                    let right = self.pos.next_right();
+                    let left = self.pos.next_left();
+
                     if board.postions_match(new_pos, up) 
                     || board.postions_match(new_pos, left) 
                     || board.postions_match(new_pos, right) {
@@ -111,7 +128,7 @@ impl Piece {
                 for point in traveling.iter() {
                     if board.has_piece(*point) {
                         return false;
-                    } else {continue;}
+                    }
                 }
                 return true;
             }
@@ -204,4 +221,6 @@ impl Piece {
         }
 
     }
+
+    //pub fn get_legal_moves
 }
