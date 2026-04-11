@@ -5,7 +5,13 @@ use core::panic::PanicInfo;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    loop {}
+    unsafe {
+        core::arch::asm!(
+        "mov rax, 0xDEADBEEF",
+        "int3",
+        options(noreturn)
+        );
+    }
 }
 
 #[panic_handler]

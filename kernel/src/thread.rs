@@ -67,13 +67,18 @@ pub unsafe extern "C" fn task_startup_hook() {
 
 impl ThreadControlBlock {
     // New kernel task
-    pub fn new(id: u64, return_address: *const (), cr3: Option<*const usize>) -> Self {
+    pub fn new(
+        id: u64,
+        return_address: *const (),
+        cr3: Option<*const usize>,
+        rip: Option<u64>,
+    ) -> Self {
         let max_stack_len = KERNEL_STACK_SIZE / core::mem::size_of::<usize>();
         let mut stack: Box<[usize]> = vec![0usize; max_stack_len].into_boxed_slice();
 
         stack[max_stack_len - 8] = 0; // r15
         stack[max_stack_len - 7] = 0; // r14
-        stack[max_stack_len - 6] = 0; // r13
+        stack[max_stack_len - 6] = rip.unwrap_or_default() as usize; // r13
         stack[max_stack_len - 5] = return_address as usize; // r12
         stack[max_stack_len - 4] = 0; // rbp
         stack[max_stack_len - 3] = 0; // rbx
@@ -181,7 +186,7 @@ impl Scheduler {
     }
 
     pub fn spawn(&mut self, id: ThreadId, return_addr: *const ()) {
-        let new_thread = Box::new(ThreadControlBlock::new(id, return_addr, None));
+        let new_thread = Box::new(ThreadControlBlock::new(id, return_addr, None, None));
         self.threads.push(new_thread);
 
         if id > 2 {

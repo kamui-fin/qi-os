@@ -8,6 +8,9 @@ use core::sync::atomic::{AtomicU64, AtomicUsize};
 
 use alloc::boxed::Box;
 use alloc::vec;
+use elf::abi::PT_LOAD;
+use elf::endian::LittleEndian;
+use elf::ElfBytes;
 use x86_64::structures::paging::page::PageRangeInclusive;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB};
@@ -23,16 +26,23 @@ use x86_64::{
 use crate::BOOT_INFO;
 use crate::{memory::BootInfoFrameAllocator, thread::ThreadControlBlock};
 
+pub static ECHO_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_echo"));
+
 pub static PID: AtomicU64 = AtomicU64::new(1 << 16);
 
-struct ProcessControlBlock {
-    tcb: ThreadControlBlock,
-    user_stack: Box<[usize]>,
-    page_table: Box<PageTable>,
-    binary_code: &'static [usize],
+pub struct ProcessControlBlock {
+    pub tcb: ThreadControlBlock,
+    pub page_table: Box<PageTable>,
 }
 
 const USER_STACK_SIZE: usize = 64 * 1024;
+
+struct ProgramMapRegion<'a> {
+    start: Page<Size4KiB>,
+    num_pages: usize,
+    flags: u32,
+    code: &'a [u8],
+}
 
 impl ProcessControlBlock {
     /*
@@ -56,17 +66,17 @@ impl ProcessControlBlock {
     #[unsafe(naked)]
     pub unsafe extern "C" fn user_process_hook() {
         naked_asm!(
+            "mov rax, 0x00007FFFFFFF0000",
             "push 0x6<<3|0b011", // ss
-            "push {}",           // rsp
+            "push rax",          // rsp
             "push 1<<9|1<<1",    // rflags
             "push 0x5<<3|0b011", // cs
-            "push 0x400000",     //eip
+            "push r13",          // rip
             "iretq",
-            in(reg) = 0x00007FFFFFFF0000
         );
     }
 
-    fn from_instructions(binary: &'static [usize]) -> Self {
+    pub fn new() -> Self {
         // Paging, start with kernel mapped
         let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
         let mut page_table = Box::new(boot_info.page_table.level_4_table().clone());
@@ -104,54 +114,80 @@ impl ProcessControlBlock {
         }
 
         // Map wherever the instructions are in memory
-        // PROBABLY need to make sure `binary` is frame-aligned + padded to avoid leaking stuff to userprocess??
-        // Re-allocate frames
-        let binary_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(
-                binary.as_ptr() as *const u8,
-                binary.len() * core::mem::size_of::<usize>(),
-            )
-        };
-        let num_pages = (binary_bytes.len() + 4095) / 4096; // round up
-        let program_start = VirtAddr::new(0x400000);
+        // ELF LOADER
 
-        for i in 0..num_pages {
-            let frame = boot_info
-                .allocator
-                .allocate_frame()
-                .expect("proc_init: out of mem");
-            let page = Page::<Size4KiB>::containing_address(program_start + (i * 4096) as u64);
+        const PAGE_SIZE: u64 = 4096;
 
-            let frame_ptr =
-                VirtAddr::new(frame.start_address().as_u64() + boot_info.physical_memory_offset)
+        let file = ElfBytes::<LittleEndian>::minimal_parse(ECHO_ELF).unwrap();
+        let program_start = VirtAddr::new(file.ehdr.e_entry);
+        let segs = file.segments().unwrap();
+        for seg in segs {
+            if seg.p_type == PT_LOAD {
+                // TODO: set flags
+                let flags = seg.p_flags;
+                let start_offset = seg.p_vaddr % PAGE_SIZE;
+                let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(seg.p_vaddr));
+                let num_pages = (seg.p_memsz + start_offset).div_ceil(PAGE_SIZE) as usize;
+
+                let code = file.segment_data(&seg).unwrap();
+                for (i, page) in
+                    Page::range(start_page, start_page + (num_pages as u64)).enumerate()
+                {
+                    let frame = boot_info
+                        .allocator
+                        .allocate_frame()
+                        .expect("proc_init: out of mem");
+
+                    let frame_ptr: *mut u8 = VirtAddr::new(
+                        frame.start_address().as_u64() + boot_info.physical_memory_offset,
+                    )
                     .as_mut_ptr();
 
-            // copy over
-            unsafe {
-                // memset 0 first
-                core::ptr::write_bytes(frame_ptr, 0, 4096);
-                let offset = i * 4096;
-                let bytes_to_copy = core::cmp::min(4096, binary_bytes.len() - offset);
-                core::ptr::copy_nonoverlapping(
-                    binary_bytes.as_ptr().add(offset),
-                    frame_ptr,
-                    bytes_to_copy,
-                );
-            }
+                    // copy over
+                    unsafe {
+                        // memset 0 first
+                        core::ptr::write_bytes(frame_ptr, 0, 4096);
 
-            unsafe {
-                let mapper_flush = mapper
-                    .map_to(
-                        page,
-                        frame,
-                        PageTableFlags::WRITABLE
-                            | PageTableFlags::PRESENT
-                            | PageTableFlags::USER_ACCESSIBLE,
-                        &mut boot_info.allocator,
-                    )
-                    .expect("(fixed offset mapping): unable to map frame");
-                mapper_flush.ignore();
-            };
+                        // what part of code do we load into this frame??
+                        // DOUBLE CHECK IF THIS LOGIC IS RIGHT
+
+                        let offset_within_frame = if i == 0 { start_offset } else { 0 } as usize;
+                        let offset_within_code =
+                            (i * 4096).saturating_sub(start_offset as usize) as u64;
+                        let remaining_file_bytes = seg.p_filesz.saturating_sub(offset_within_code);
+
+                        let bytes_to_copy = core::cmp::min(
+                            4096 - (offset_within_frame as u64),
+                            seg.p_memsz - offset_within_code,
+                        ) as usize;
+
+                        let bytes_from_file =
+                            core::cmp::min(bytes_to_copy, remaining_file_bytes as usize);
+
+                        if bytes_from_file > 0 {
+                            core::ptr::copy_nonoverlapping(
+                                code.as_ptr().add(offset_within_code as usize),
+                                frame_ptr.add(offset_within_frame),
+                                bytes_from_file,
+                            );
+                        }
+                    }
+
+                    unsafe {
+                        let mapper_flush = mapper
+                            .map_to(
+                                page,
+                                frame,
+                                PageTableFlags::WRITABLE
+                                    | PageTableFlags::PRESENT
+                                    | PageTableFlags::USER_ACCESSIBLE,
+                                &mut boot_info.allocator,
+                            )
+                            .expect("(fixed offset mapping): unable to map frame");
+                        mapper_flush.ignore();
+                    };
+                }
+            }
         }
 
         let cr3 = &*page_table as *const _ as u64;
@@ -161,13 +197,9 @@ impl ProcessControlBlock {
             PID.fetch_add(1u64, core::sync::atomic::Ordering::Relaxed),
             Self::user_process_hook as *const (),
             Some(cr3 as *const usize),
+            Some(program_start.as_u64()),
         );
 
-        Self {
-            tcb,
-            page_table,
-            user_stack: Box::new([]),
-            binary_code: binary,
-        }
+        Self { tcb, page_table }
     }
 }

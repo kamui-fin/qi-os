@@ -7,6 +7,9 @@ use alloc::task;
 use conquer_once::doc::OnceCell;
 use core::arch::asm;
 use core::panic::PanicInfo;
+use elf::abi::PT_LOAD;
+use elf::endian::{AnyEndian, LittleEndian};
+use elf::ElfBytes;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
@@ -15,7 +18,9 @@ use embedded_graphics::{
 };
 use kernel::allocator::init_heap;
 use kernel::graphics::Screen;
+use kernel::lock::NEEDS_RESCHEDULE;
 use kernel::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
+use kernel::proc::ProcessControlBlock;
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::Task;
@@ -71,44 +76,18 @@ pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
         .draw(boot_info.screen)
         .unwrap();
 
+    // sample echo.rs userland process
+    let proc = ProcessControlBlock::new();
+    let id = proc.tcb.id;
+    let tcb = Box::new(proc.tcb);
     {
         let mut scheduler = SCHEDULER.lock();
         scheduler.spawn(2, cleaner_task as *const ());
-        scheduler.spawn(3, task_a as *const ());
-        scheduler.spawn(4, task_b as *const ());
+        scheduler.threads.push(tcb);
+        scheduler.ready_queue.push_back(id);
     }
 
-    // test sleep & terminate
     hlt_loop();
-}
-
-fn task_a() {
-    loop {
-        for i in 0..10000 {
-            serial_println!(
-                "[task A] Counter: {} at {}",
-                i + 1,
-                get_time_since_boot() / 1_000_000
-            );
-            nano_sleep(1000 * 1_000_000);
-        }
-    }
-}
-
-fn task_b() {
-    loop {
-        for i in 0..10000 {
-            if i == 10 {
-                terminate_task();
-            }
-            serial_println!(
-                "[task B] Counter: {} at {}",
-                i + 1,
-                get_time_since_boot() / 1_000_000
-            );
-            nano_sleep(1000 * 1_000_000);
-        }
-    }
 }
 
 fn cleaner_task() {
