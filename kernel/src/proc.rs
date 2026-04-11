@@ -35,6 +35,12 @@ pub struct ProcessControlBlock<'a> {
     pub page_table: &'a PageTable,
 }
 
+impl Default for ProcessControlBlock<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 const USER_STACK_SIZE: usize = 64 * 1024;
 
 impl<'a> ProcessControlBlock<'a> {
@@ -78,7 +84,7 @@ impl<'a> ProcessControlBlock<'a> {
         let cr3 = l4_table.start_address().as_u64();
 
         let l4_virt = VirtAddr::new(cr3 + boot_info.physical_memory_offset);
-        let mut page_table: &mut PageTable = unsafe { &mut *l4_virt.as_mut_ptr() };
+        let page_table: &mut PageTable = unsafe { &mut *l4_virt.as_mut_ptr() };
 
         let active_l4 = boot_info.page_table.level_4_table();
         for i in 0..512 {
@@ -89,10 +95,7 @@ impl<'a> ProcessControlBlock<'a> {
             }
         }
         let mut mapper = unsafe {
-            OffsetPageTable::new(
-                &mut page_table,
-                VirtAddr::new(boot_info.physical_memory_offset),
-            )
+            OffsetPageTable::new(page_table, VirtAddr::new(boot_info.physical_memory_offset))
         };
         // Then map the User Stack: High up at e.g. 0x0000_7FFF_FFFF_0000 (USER BIT SET)
         let stack_top = VirtAddr::new(0x0000_7FFF_FFFF_0000);
@@ -129,7 +132,7 @@ impl<'a> ProcessControlBlock<'a> {
         for seg in segs {
             if seg.p_type == PT_LOAD {
                 // TODO: set flags
-                let flags = seg.p_flags;
+                // let flags = seg.p_flags;
                 let start_offset = seg.p_vaddr % PAGE_SIZE;
                 let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(seg.p_vaddr));
                 let num_pages = (seg.p_memsz + start_offset).div_ceil(PAGE_SIZE) as usize;
@@ -193,9 +196,6 @@ impl<'a> ProcessControlBlock<'a> {
                 }
             }
         }
-
-        let cr3 = &*page_table as *const _ as u64;
-        let cr3 = cr3 - boot_info.physical_memory_offset;
 
         let tcb = ThreadControlBlock::new(
             PID.fetch_add(1u64, core::sync::atomic::Ordering::Relaxed),

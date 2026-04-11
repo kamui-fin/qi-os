@@ -24,6 +24,7 @@ lazy_static! {
     pub static ref SCHEDULER: SimpleIrqLock<Scheduler> = SimpleIrqLock::new(Scheduler::new());
 }
 
+#[repr(C)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum BlockReason {
     Paused,
@@ -176,6 +177,7 @@ impl Scheduler {
                 .iter_mut()
                 .find(|t| t.id == next_id)
                 .expect("thread not found");
+            serial_println!("Switching to {}", next_thread.id);
             next_thread.state = ThreadState::Running;
             Some(&mut **next_thread as *mut ThreadControlBlock)
         } else {

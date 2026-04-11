@@ -53,28 +53,30 @@ pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
     let boot_info: &'static mut BootInfo = unsafe { &mut *boot_info };
     BOOT_INFO.init_once(|| Mutex::new(boot_info));
 
-    let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
+    {
+        let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
 
-    let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
-    allocator::init_heap(&mut mapper, &mut boot_info.allocator)
-        .expect("heap initialization failed");
+        let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
+        allocator::init_heap(&mut mapper, &mut boot_info.allocator)
+            .expect("heap initialization failed");
 
-    serial_println!("Qi OS booted up!\n");
-    serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
+        serial_println!("Qi OS booted up!\n");
+        serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
 
-    kernel::pit::init_pit();
+        kernel::pit::init_pit();
 
-    unsafe {
-        MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
-        CURR_THREAD_PTR = MAIN_THREAD;
+        unsafe {
+            MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
+            CURR_THREAD_PTR = MAIN_THREAD;
+        }
+
+        x86_64::instructions::interrupts::enable();
+
+        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+        Text::new("Hello Rust!", Point::new(20, 30), style)
+            .draw(boot_info.screen)
+            .unwrap();
     }
-
-    x86_64::instructions::interrupts::enable();
-
-    let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-    Text::new("Hello Rust!", Point::new(20, 30), style)
-        .draw(boot_info.screen)
-        .unwrap();
 
     // sample echo.rs userland process
     let proc = ProcessControlBlock::new();

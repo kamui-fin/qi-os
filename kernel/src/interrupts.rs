@@ -1,3 +1,4 @@
+use core::arch::asm;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 
@@ -14,6 +15,7 @@ use crate::thread::ThreadState;
 use crate::thread::CURR_THREAD_PTR;
 use crate::thread::SCHEDULER;
 use alloc::boxed::Box;
+use futures_util::stream::select_with_strategy;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
@@ -40,13 +42,67 @@ lazy_static! {
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault.set_handler_fn(gpf_handler);
-
+        idt[0x80]
+            .set_handler_fn(syscall_handler)
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
         idt
     };
 }
 
-pub fn init_idt() {
-    IDT.load();
+/* LETS IMPLEMENT SYSCALLS NOW!
+*
+* INT NO: 0x80
+* Syscall number in RAX
+*   RDI	arg1
+    RSI	arg2
+    RDX	arg3
+    R10	arg4
+    R8	arg5
+    R9	arg6
+* Return value RAX
+*
+*/
+
+enum SysCallKind {
+    Debug,
+    Exit,
+}
+
+impl From<usize> for SysCallKind {
+    fn from(value: usize) -> Self {
+        match value {
+            0x0 => Self::Debug,
+            0x1 => Self::Exit,
+            _ => Self::Exit,
+        }
+    }
+}
+
+extern "x86-interrupt" fn syscall_handler(stack_frame: InterruptStackFrame) {
+    let kind: usize;
+    let arg1: usize;
+    let arg2: usize;
+    let arg3: usize;
+    let arg4: usize;
+    let arg5: usize;
+    let arg6: usize;
+    unsafe {
+        asm!("mov {0}, rax", out(reg) kind);
+        asm!("mov {0}, rdi", out(reg) arg1);
+        asm!("mov {0}, rsi", out(reg) arg2);
+        asm!("mov {0}, rdx", out(reg) arg3);
+        asm!("mov {0}, r10", out(reg) arg4);
+        asm!("mov {0}, r8", out(reg) arg5);
+        asm!("mov {0}, r9", out(reg) arg6);
+    }
+
+    let kind = SysCallKind::from(kind);
+    match kind {
+        SysCallKind::Debug => {
+            // print string pointed to by arg1
+        }
+        SysCallKind::Exit => {}
+    }
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
@@ -66,26 +122,6 @@ extern "x86-interrupt" fn double_fault_handler(
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
-
-// #[test_case]
-// fn test_breakpoint_exception() {
-//     // invoke a breakpoint exception
-//     x86_64::instructions::interrupts::int3();
-// }
-
-/* #[test_case]
-fn test_unhandle_exception() {
-    // divide by 0 using asm
-    // should fail b/c no handler
-    unsafe {
-        core::arch::asm!(
-            "xor rdx, rdx", // Clear rdx (upper 64 bits of the dividend)
-            "mov rax, 0x1", // Set rax to 1 (lower 64 bits of the dividend)
-            "mov rcx, 0x0", // Set rcx to 0 (the divisor)
-            "div rcx",      // Divide rax by rcx -> Trigger Exception!
-        );
-    }
-} */
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -191,4 +227,8 @@ extern "x86-interrupt" fn page_fault_handler(
     serial_println!("Error Code: {:?}", error_code);
     serial_println!("{:#?}", stack_frame);
     hlt_loop();
+}
+
+pub fn init_idt() {
+    IDT.load();
 }
