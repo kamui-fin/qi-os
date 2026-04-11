@@ -82,7 +82,8 @@ pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
     let tcb = Box::new(proc.tcb);
     {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn(2, cleaner_task as *const ());
+        // scheduler.spawn(2, cleaner_task as *const ());
+
         scheduler.threads.push(tcb);
         scheduler.ready_queue.push_back(id);
     }

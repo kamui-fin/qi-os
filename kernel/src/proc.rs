@@ -30,21 +30,14 @@ pub static ECHO_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_echo")
 
 pub static PID: AtomicU64 = AtomicU64::new(1 << 16);
 
-pub struct ProcessControlBlock {
+pub struct ProcessControlBlock<'a> {
     pub tcb: ThreadControlBlock,
-    pub page_table: Box<PageTable>,
+    pub page_table: &'a PageTable,
 }
 
 const USER_STACK_SIZE: usize = 64 * 1024;
 
-struct ProgramMapRegion<'a> {
-    start: Page<Size4KiB>,
-    num_pages: usize,
-    flags: u32,
-    code: &'a [u8],
-}
-
-impl ProcessControlBlock {
+impl<'a> ProcessControlBlock<'a> {
     /*
     Function given curr ESP, reload new SS:ESP
     EIP store on old stack, new EIP popped off new stack when function returns
@@ -76,12 +69,24 @@ impl ProcessControlBlock {
         );
     }
 
+    // TODO: handle memory leaks with these manual allocations upon proc die
     pub fn new() -> Self {
         // Paging, start with kernel mapped
         let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
-        let mut page_table = Box::new(boot_info.page_table.level_4_table().clone());
-        for i in 0..256 {
-            page_table[i] = PageTableEntry::new();
+
+        let l4_table = boot_info.allocator.allocate_frame().unwrap();
+        let cr3 = l4_table.start_address().as_u64();
+
+        let l4_virt = VirtAddr::new(cr3 + boot_info.physical_memory_offset);
+        let mut page_table: &mut PageTable = unsafe { &mut *l4_virt.as_mut_ptr() };
+
+        let active_l4 = boot_info.page_table.level_4_table();
+        for i in 0..512 {
+            if i < 256 {
+                page_table[i] = PageTableEntry::new();
+            } else {
+                page_table[i] = active_l4[i].clone();
+            }
         }
         let mut mapper = unsafe {
             OffsetPageTable::new(
@@ -149,7 +154,6 @@ impl ProcessControlBlock {
                         core::ptr::write_bytes(frame_ptr, 0, 4096);
 
                         // what part of code do we load into this frame??
-                        // DOUBLE CHECK IF THIS LOGIC IS RIGHT
 
                         let offset_within_frame = if i == 0 { start_offset } else { 0 } as usize;
                         let offset_within_code =
