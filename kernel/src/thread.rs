@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 use core::{
     arch::{asm, naked_asm},
     cell::UnsafeCell,
@@ -6,6 +6,7 @@ use core::{
     ptr::from_ref,
     sync::atomic::AtomicUsize,
 };
+use spin::Mutex;
 
 use crate::{
     interrupts::{ELAPSED, TIME_SLICE},
@@ -29,7 +30,7 @@ lazy_static! {
 pub enum BlockReason {
     Paused,
     Sleep(u64), // sleep expiry
-    Terminated,
+    Terminated(u8),
 }
 
 #[repr(C)]
@@ -73,13 +74,14 @@ impl ThreadControlBlock {
         return_address: *const (),
         cr3: Option<*const usize>,
         rip: Option<u64>,
+        rsp: Option<u64>,
     ) -> Self {
         let max_stack_len = KERNEL_STACK_SIZE / core::mem::size_of::<usize>();
         // TODO: guard page
         let mut stack: Box<[usize]> = vec![0usize; max_stack_len].into_boxed_slice();
 
         stack[max_stack_len - 8] = 0; // r15
-        stack[max_stack_len - 7] = 0; // r14
+        stack[max_stack_len - 7] = rsp.unwrap_or_default() as usize; // r14
         stack[max_stack_len - 6] = rip.unwrap_or_default() as usize; // r13
         stack[max_stack_len - 5] = return_address as usize; // r12
         stack[max_stack_len - 4] = 0; // rbp
@@ -93,7 +95,7 @@ impl ThreadControlBlock {
             let cr3: *const usize;
             unsafe {
                 asm!(r#"
-                mov {}, cr3
+                mov {}, cr3    // Drop the Box! Arc<Spinlock<T>> is the standard way.
             "#, out(reg) cr3)
             }
             cr3
@@ -152,7 +154,7 @@ extern "C" {
 }
 
 pub struct Scheduler {
-    pub threads: Vec<Box<ThreadControlBlock>>,
+    pub threads: Vec<Arc<Mutex<ThreadControlBlock>>>,
     pub ready_queue: VecDeque<ThreadId>,
 }
 
@@ -172,14 +174,16 @@ impl Scheduler {
 
     pub fn pick_next_thread(&mut self) -> Option<*mut ThreadControlBlock> {
         if let Some(next_id) = self.ready_queue.pop_front() {
-            let next_thread = self
+            let mut next_thread = self
                 .threads
                 .iter_mut()
-                .find(|t| t.id == next_id)
-                .expect("thread not found");
+                .find(|t| t.lock().id == next_id)
+                .expect("thread not found")
+                .lock();
             serial_println!("Switching to {}", next_thread.id);
             next_thread.state = ThreadState::Running;
-            Some(&mut **next_thread as *mut ThreadControlBlock)
+
+            Some(&mut *next_thread as *mut ThreadControlBlock)
         } else {
             let idle_thread = unsafe { &mut *MAIN_THREAD };
             idle_thread.state = ThreadState::Running;
@@ -188,7 +192,13 @@ impl Scheduler {
     }
 
     pub fn spawn(&mut self, id: ThreadId, return_addr: *const ()) {
-        let new_thread = Box::new(ThreadControlBlock::new(id, return_addr, None, None));
+        let new_thread = Arc::new(Mutex::new(ThreadControlBlock::new(
+            id,
+            return_addr,
+            None,
+            None,
+            None
+        )));
         self.threads.push(new_thread);
 
         if id > 2 {
@@ -199,8 +209,9 @@ impl Scheduler {
     pub fn unblock_task(&mut self, id: ThreadId) {
         let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
         let num_threads = self.threads.len();
-        let thread = self.threads.iter_mut().find(|t| t.id == id);
+        let thread = self.threads.iter_mut().find(|t| t.lock().id == id);
         if let Some(thread) = thread {
+            let mut thread = thread.lock();
             thread.state = ThreadState::Ready;
             self.ready_queue.push_back(id);
 
@@ -268,13 +279,13 @@ fn nano_sleep_until(abs_time: u64) {
     block_task(BlockReason::Sleep(abs_time));
 }
 
-pub fn terminate_task() {
+pub fn terminate_task(status: u8) {
     {
         let mut scheduler = SCHEDULER.lock();
         scheduler.unblock_task(2); // 2 is cleaner task
     }
 
-    block_task(BlockReason::Terminated);
+    block_task(BlockReason::Terminated(status));
 }
 
 pub fn yield_sched() {

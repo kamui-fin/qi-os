@@ -2,14 +2,16 @@
 #![no_std]
 #![no_main]
 
+use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
+use crossbeam_queue::ArrayQueue;
 use spin::Mutex;
 use x86_64::{
     structures::paging::{frame::PhysFrameRangeInclusive, OffsetPageTable, Size2MiB},
     VirtAddr,
 };
 
-use crate::{graphics::Screen, memory::BootInfoFrameAllocator};
+use crate::{graphics::Screen, memory::BootInfoFrameAllocator, proc::ProcessControlBlock};
 
 extern crate alloc;
 
@@ -27,6 +29,7 @@ pub mod thread;
 pub mod vga_buffer;
 
 pub static BOOT_INFO: OnceCell<Mutex<&'static mut BootInfo>> = OnceCell::uninit();
+pub static PROC: OnceCell<Mutex<Vec<ProcessControlBlock>>> = OnceCell::uninit();
 
 #[repr(C)]
 #[derive(Debug)]

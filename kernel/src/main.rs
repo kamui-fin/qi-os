@@ -3,10 +3,13 @@
 #![feature(step_trait)]
 
 use alloc::boxed::Box;
-use alloc::task;
-use conquer_once::doc::OnceCell;
+use alloc::vec::Vec;
+use alloc::{task, vec};
+use conquer_once::spin::OnceCell;
 use core::arch::asm;
+use core::ffi::c_char;
 use core::panic::PanicInfo;
+use crossbeam_queue::ArrayQueue;
 use elf::abi::PT_LOAD;
 use elf::endian::{AnyEndian, LittleEndian};
 use elf::ElfBytes;
@@ -18,9 +21,10 @@ use embedded_graphics::{
 };
 use kernel::allocator::init_heap;
 use kernel::graphics::Screen;
+use kernel::interrupts::spawn_proc;
 use kernel::lock::NEEDS_RESCHEDULE;
 use kernel::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
-use kernel::proc::ProcessControlBlock;
+use kernel::proc::{ProcessControlBlock, ECHO_ELF};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::Task;
@@ -31,7 +35,7 @@ use kernel::thread::{
 };
 use kernel::{
     allocator, hlt_loop, init, memory, println, serial, serial_print, serial_println, BootInfo,
-    BOOT_INFO,
+    BOOT_INFO, PROC,
 };
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
@@ -78,17 +82,21 @@ pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
             .unwrap();
     }
 
-    // sample echo.rs userland process
-    let proc = ProcessControlBlock::new();
-    let id = proc.tcb.id;
-    let tcb = Box::new(proc.tcb);
+    PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
+
     {
         let mut scheduler = SCHEDULER.lock();
-        // scheduler.spawn(2, cleaner_task as *const ());
-
-        scheduler.threads.push(tcb);
-        scheduler.ready_queue.push_back(id);
+        scheduler.spawn(2, cleaner_task as *const ());
     }
+
+    let args = [
+        c"hello".as_ptr(),
+        c"world".as_ptr(),
+        c"good".as_ptr(),
+        c"bye".as_ptr(),
+    ];
+
+        spawn_proc(c"echo", args.as_ptr(), 4);
 
     hlt_loop();
 }
@@ -98,7 +106,13 @@ fn cleaner_task() {
         let removed_task = {
             let mut scheduler = SCHEDULER.lock();
             let task_index = scheduler.threads.iter().position(|t| {
-                t.state == ThreadState::Blocked(kernel::thread::BlockReason::Terminated)
+                if let ThreadState::Blocked(kernel::thread::BlockReason::Terminated(_)) =
+                    t.lock().state
+                {
+                    true
+                } else {
+                    false
+                }
             });
             if let Some(task_index) = task_index {
                 Some(scheduler.threads.remove(task_index))
@@ -123,6 +137,6 @@ fn cleaner_task() {
 // #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    serial_println!("{}", info);
+    serial_println!("kpanic: {}", info);
     kernel::hlt_loop();
 }
