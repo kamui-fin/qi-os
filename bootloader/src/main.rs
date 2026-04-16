@@ -38,13 +38,20 @@ pub struct Screen {
 }
 
 #[repr(C)]
-pub struct BootInfo<'a> {
-    screen: &'a Screen,
-    allocator: BootInfoFrameAllocator,
-    page_table: OffsetPageTable<'a>,
+pub struct RawBootInfo {
+    screen_phys_addr: u64,
     physical_memory_offset: u64,
-    kernel_base_virt: VirtAddr,
-    kernel_frame_range: PhysFrameRangeInclusive<Size2MiB>,
+    kernel_base_virt: u64,
+    kernel_loaded_address: u64,
+    kernel_size: u64,
+    kstack_top: u64,
+    kstack_bottom: u64,
+
+    mem_map_phys_addr: u64,
+    mem_map_entry_count: usize,
+
+    l4_table_phys_addr: u64,
+    free_memory_start_phys: u64,
 }
 
 #[no_mangle]
@@ -198,17 +205,22 @@ pub extern "C" fn _start(screen: *const Screen) -> ! {
     }
 
     let kstack_top = stack_end_addr.align_down(16u8);
-    let _kstack_bottom = stack_start.start_address();
+    let kstack_bottom = stack_start.start_address();
 
     x86_64::instructions::tlb::flush_all();
 
-    let boot_info = BootInfo {
-        screen,
-        allocator: frame_allocator,
-        page_table: kernel_page_table,
+    let boot_info = RawBootInfo {
+        screen_phys_addr: screen as *const _ as u64,
         physical_memory_offset: phys_mem_offset.as_u64(),
-        kernel_base_virt,
-        kernel_frame_range,
+        kernel_base_virt: kernel_base_virt.as_u64(),
+        kstack_top: kstack_top.as_u64(),
+        kstack_bottom: kstack_bottom.as_u64(),
+        kernel_size: kernel_size_bytes,
+        kernel_loaded_address: kernel_base_phys.as_u64(),
+        mem_map_phys_addr: mem_map.as_ptr() as u64,
+        mem_map_entry_count: mem_map.len(),
+        l4_table_phys_addr: kernel_level_4_frame.start_address().as_u64(),
+        free_memory_start_phys: frame_allocator.next_free_phys_addr(),
     };
 
     serial_println!("Finished mapping everything.");

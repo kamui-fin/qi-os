@@ -8,6 +8,8 @@ use core::{
     ptr::null,
 };
 
+use userland::{get_pid, println};
+
 global_asm!(
     ".section .text._start",
     ".global _start",
@@ -21,43 +23,6 @@ global_asm!(
     "   mov rax, 1   ",
     "   int 0x80     ",
 );
-
-fn println(string: &str) {
-    let ptr = string.as_ptr().addr();
-    let len = string.len();
-
-    unsafe {
-        core::arch::asm!(
-            "int 0x80",
-            in("rax") 0x0,
-            in("rdi") ptr,
-            in("rsi") len,
-        );
-    }
-}
-
-fn exit(status: u8) {
-    unsafe {
-        core::arch::asm!(
-            "int 0x80",
-            in("rax") 0x1,
-            in("rdi") status as u64,
-            options(noreturn)
-        );
-    }
-}
-
-fn get_pid() -> usize {
-    let mut pid: usize = 0;
-    unsafe {
-        core::arch::asm!(
-            "int 0x80",
-            in("rax") 0x6,
-            lateout("rax") pid
-        );
-    }
-    pid
-}
 
 #[no_mangle]
 pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {

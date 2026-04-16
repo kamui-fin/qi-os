@@ -23,7 +23,7 @@ use kernel::allocator::init_heap;
 use kernel::graphics::Screen;
 use kernel::interrupts::spawn_proc;
 use kernel::lock::NEEDS_RESCHEDULE;
-use kernel::memory::{BootInfoFrameAllocator, MemoryMapEntry, UsedRegion};
+use kernel::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::proc::{ProcessControlBlock, ECHO_ELF};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
@@ -35,7 +35,7 @@ use kernel::thread::{
 };
 use kernel::{
     allocator, hlt_loop, init, memory, println, serial, serial_print, serial_println, BootInfo,
-    BOOT_INFO, PROC,
+    RawBootInfo, BOOT_INFO, PROC,
 };
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
@@ -51,10 +51,40 @@ use x86_64::{PhysAddr, VirtAddr};
 extern crate alloc;
 
 #[no_mangle]
-pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
+pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     init();
 
-    let boot_info: &'static mut BootInfo = unsafe { &mut *boot_info };
+    // 1. Get the BootInfo struct
+    let boot_info = unsafe { &*(boot_info as *const RawBootInfo) };
+    serial_println!("{:#?}", boot_info);
+    let phys_offset = boot_info.physical_memory_offset;
+    let screen_virt = boot_info.screen_phys_addr + phys_offset;
+    let mut screen = unsafe { (*(screen_virt as *const Screen)).clone() };
+
+    let mem_map_virt = boot_info.mem_map_phys_addr + phys_offset;
+    let mem_map: &'static mut [MemoryMapEntry] = unsafe {
+        core::slice::from_raw_parts_mut(
+            mem_map_virt as *mut MemoryMapEntry,
+            boot_info.mem_map_entry_count,
+        )
+    };
+    let allocator = BumpAllocator::starts_at(
+        boot_info.free_memory_start_phys,
+        mem_map,
+        UsedRegion {
+            start_address: PhysAddr::new(boot_info.kernel_loaded_address),
+            size: boot_info.kernel_size,
+        },
+    );
+
+    let boot_info = BootInfo {
+        screen,
+        allocator,
+        page_table_address: boot_info.l4_table_phys_addr,
+        physical_memory_offset: phys_offset,
+        kernel_base_virt: boot_info.kernel_base_virt,
+    };
+
     BOOT_INFO.init_once(|| Mutex::new(boot_info));
 
     {
@@ -75,11 +105,6 @@ pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
         }
 
         x86_64::instructions::interrupts::enable();
-
-        let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
-        Text::new("Hello Rust!", Point::new(20, 30), style)
-            .draw(boot_info.screen)
-            .unwrap();
     }
 
     PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
@@ -87,18 +112,50 @@ pub extern "C" fn _start(boot_info: *mut BootInfo<'static>) -> ! {
     {
         let mut scheduler = SCHEDULER.lock();
         scheduler.spawn(2, cleaner_task as *const ());
+        // For now, compositor is just a kernel task
+        scheduler.spawn(3, compositor_task as *const ());
     }
 
-    let args = [
-        c"hello".as_ptr(),
-        c"world".as_ptr(),
-        c"good".as_ptr(),
-        c"bye".as_ptr(),
-    ];
-
-        spawn_proc(c"echo", args.as_ptr(), 4);
+    let args = [c"test".as_ptr()];
+    spawn_proc(c"xiangqi", args.as_ptr(), 1);
 
     hlt_loop();
+}
+
+fn compositor_task() {
+    loop {
+        // Wait for a commit_frame() syscall
+        serial_println!("[compositor] Going to zzzz..");
+        block_task(BlockReason::CompositorWait);
+
+        let procs = PROC.get().unwrap().lock();
+        serial_println!("[compositor] Unblocked, going thru {} procs", procs.iter().len());
+
+        // paint each proccess backbuffer, for now there's no z-index
+        for curr_proc in procs.iter() {
+            serial_println!("{}", curr_proc.backbuffer_frames.is_none());
+            if let Some(bb_frames) = &curr_proc.backbuffer_frames {
+                serial_println!("Painting frame!");
+                let mut boot_info = BOOT_INFO.get().unwrap().lock();
+                let lfb_start_ptr = boot_info.screen.buffer_mut().as_mut_ptr();
+                let mut bytes_remaining = boot_info.screen.buffer_mut().len();
+                for (i, frame) in bb_frames.iter().enumerate() {
+                    // copy this physical frame to our LFB
+                    let offset = i * 4096;
+                    let frame_ptr: *mut u8 = VirtAddr::new(
+                        frame.start_address().as_u64() + boot_info.physical_memory_offset,
+                    )
+                    .as_mut_ptr();
+                    let bytes_to_copy = core::cmp::min(4096, bytes_remaining);
+                    unsafe {
+                        let dst_ptr = lfb_start_ptr.add(offset);
+                        core::ptr::copy_nonoverlapping(frame_ptr, dst_ptr, 4096);
+                    }
+                    bytes_remaining -= bytes_to_copy;
+                }
+            }
+        }
+    }
 }
 
 fn cleaner_task() {

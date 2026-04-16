@@ -4,7 +4,7 @@ use linked_list_allocator::LockedHeap;
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub const HEAP_START: usize = 0xFFFF_A000_0000_0000;
-pub const HEAP_SIZE: usize = 2048 * 1024;
+pub const HEAP_SIZE: usize = 1024 * 1024 * 100;
 
 use x86_64::{
     structures::paging::{

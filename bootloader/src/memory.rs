@@ -45,6 +45,14 @@ pub struct UsedRegion {
 }
 
 impl BootInfoFrameAllocator {
+    pub fn next_free_phys_addr(&self) -> u64 {
+        self.usable_frames()
+            .nth(self.next)
+            .unwrap()
+            .start_address()
+            .as_u64()
+    }
+
     pub fn starts_at(
         start_frame_addr: u64,
         memory_map: &'static [MemoryMapEntry],

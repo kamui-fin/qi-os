@@ -66,11 +66,12 @@ pub unsafe fn get_mem_map() -> &'static mut [MemoryMapEntry] {
 }
 
 #[derive(Debug)]
-pub struct BootInfoFrameAllocator {
+pub struct BumpAllocator {
     memory_map: &'static [MemoryMapEntry],
     used_frame_range: PhysFrameRangeInclusive,
-    start_frame_addr: u64,
-    next: usize,
+
+    current_region_index: usize,
+    next_phys_addr: u64,
 }
 
 pub struct UsedRegion {
@@ -78,7 +79,7 @@ pub struct UsedRegion {
     pub size: u64,
 }
 
-impl BootInfoFrameAllocator {
+impl BumpAllocator {
     pub fn starts_at(
         start_frame_addr: u64,
         memory_map: &'static [MemoryMapEntry],
@@ -90,35 +91,70 @@ impl BootInfoFrameAllocator {
         ));
 
         Self {
-            next: 0,
-            start_frame_addr,
             used_frame_range: PhysFrame::range_inclusive(start_frame, end_frame),
             memory_map,
+            current_region_index: 0,
+            next_phys_addr: start_frame_addr,
         }
     }
 
-    /// Returns an iterator over the usable frames specified in the memory map.
-    pub fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> + '_ {
+    pub fn next_frame(&mut self) -> Option<PhysFrame> {
         // get usable regions from memory map
-        let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.mem_type == 1);
-        // map each region to its address range
-        let addr_ranges = usable_regions.map(|r| r.start_addr()..r.end_addr());
-        // transform to an iterator of frame start addresses
-        let frame_addresses = addr_ranges
-            .flat_map(|r| r.step_by(4096))
-            .filter(|r| *r >= self.start_frame_addr);
-        // create `PhysFrame` types from the start addresses
-        frame_addresses
-            .map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
-            .filter(|pf| (*pf > self.used_frame_range.end) || (*pf < self.used_frame_range.start))
+        loop {
+            let region = match self.memory_map.get(self.current_region_index) {
+                Some(region) => region,
+                None => return None,
+            };
+
+            if region.start_addr() > self.next_phys_addr {
+                self.next_phys_addr = region.start_addr();
+            }
+
+            // region must be usable
+            if region.mem_type != 1 {
+                self.current_region_index += 1;
+                continue;
+            }
+
+            // we must not be within kernel range
+            if (self.next_phys_addr >= self.used_frame_range.start.start_address().as_u64())
+                && (self.next_phys_addr < self.used_frame_range.end.start_address().as_u64() + 4096)
+            {
+                self.next_phys_addr = self.used_frame_range.end.start_address().as_u64() + 4096;
+                continue;
+            }
+
+            // region must be within range
+            if region.end_addr() < self.next_phys_addr + 4096 {
+                self.current_region_index += 1;
+                continue;
+            }
+
+            let align_offset = self.next_phys_addr % 4096;
+            if align_offset != 0 {
+                self.next_phys_addr += 4096 - align_offset;
+                continue; // Address changed, re-evaluate!
+            }
+
+            // does a FULL 4KiB frame fit in this region?
+            if self.next_phys_addr + 4096 > region.end_addr() {
+                self.current_region_index += 1;
+                continue;
+            }
+
+            // check if we're still in valid range now after bumping
+            break;
+        }
+
+        // if within used range, bump to end of that range
+        let curr_frame = PhysFrame::containing_address(PhysAddr::new(self.next_phys_addr));
+        self.next_phys_addr += 4096;
+        Some(curr_frame)
     }
 }
 
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
+unsafe impl FrameAllocator<Size4KiB> for BumpAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        self.next_frame()
     }
 }

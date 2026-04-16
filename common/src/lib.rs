@@ -1,33 +1,27 @@
+#![no_std]
+
 use embedded_graphics::{
-    pixelcolor::{raw::ToBytes, Rgb565},
-    prelude::{OriginDimensions, Point, RgbColor, Size},
     Pixel,
+    pixelcolor::{Rgb565, raw::ToBytes},
+    prelude::{OriginDimensions, Point, RgbColor, Size},
 };
 
-use crate::serial_println;
-
+// User-land graphics
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Screen {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserWindow {
+    pub base_addr: u64,
     pub width: u32,
     pub height: u32,
-    pub bpp: u32,
     pub bytes_per_pixel: u32,
     pub bytes_per_line: u32,
-    pub screen_size: u32,
-    pub screen_size_dqwords: u32,
-    pub framebuffer: u32,
-    pub x: u32,
-    pub y: u32,
-    pub x_max: u32,
-    pub y_max: u32,
 }
 
-impl Screen {
+impl UserWindow {
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         unsafe {
             core::slice::from_raw_parts_mut(
-                (self.framebuffer) as *mut u8,
+                self.base_addr as *mut u8,
                 (self.bytes_per_line * self.height) as usize,
             )
         }
@@ -49,7 +43,7 @@ impl Screen {
     }
 }
 
-impl embedded_graphics::draw_target::DrawTarget for Screen {
+impl embedded_graphics::draw_target::DrawTarget for UserWindow {
     type Color = embedded_graphics::pixelcolor::Rgb565;
 
     /// Drawing operations can never fail.
@@ -66,7 +60,7 @@ impl embedded_graphics::draw_target::DrawTarget for Screen {
     }
 }
 
-impl OriginDimensions for Screen {
+impl OriginDimensions for UserWindow {
     fn size(&self) -> Size {
         Size::new(self.width, self.height)
     }

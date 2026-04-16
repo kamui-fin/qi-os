@@ -3,6 +3,7 @@ use core::arch::naked_asm;
 use core::ffi::c_char;
 use core::ffi::c_str;
 use core::ffi::CStr;
+use core::num;
 use core::ptr;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
@@ -13,8 +14,10 @@ use crate::print;
 use crate::println;
 use crate::proc::ProcessControlBlock;
 use crate::proc::ECHO_ELF;
+use crate::proc::XIANGQI_ELF;
 use crate::serial_print;
 use crate::serial_println;
+use crate::thread::nano_sleep;
 use crate::thread::switch_if_needed;
 use crate::thread::terminate_task;
 use crate::thread::BlockReason;
@@ -25,20 +28,21 @@ use crate::thread::SCHEDULER;
 use crate::BOOT_INFO;
 use crate::PROC;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use common::UserWindow;
 use futures_util::stream::select_with_strategy;
-use x86_64::structures::idt::PageFaultErrorCode;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
-use x86_64::VirtAddr;
-
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
+use x86_64::structures::idt::PageFaultErrorCode;
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::OffsetPageTable;
 use x86_64::structures::paging::Page;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::structures::paging::Size4KiB;
+use x86_64::VirtAddr;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -103,6 +107,9 @@ enum SysCallKind {
     Wait,  // pid
     Alloc, // size
     GetPid,
+    AllocBackBuffer,
+    GraphicsFrameReady,
+    Sleep,
 }
 
 impl From<usize> for SysCallKind {
@@ -113,7 +120,10 @@ impl From<usize> for SysCallKind {
             0x2 => Self::Spawn,
             0x3 => Self::Wait,
             0x4 => Self::Alloc,
-            0x6 => Self::GetPid,
+            0x5 => Self::GetPid,
+            0x6 => Self::AllocBackBuffer,
+            0x7 => Self::GraphicsFrameReady,
+            0x8 => Self::Sleep,
             _ => panic!("unknown syscall"),
         }
     }
@@ -235,6 +245,87 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         }
         SysCallKind::Wait => {
             // block/sleep until process exits?
+            // more useful when we build a shell
+            unimplemented!()
+        }
+        SysCallKind::AllocBackBuffer => {
+            // get the length of LFB and allocate needed frames, zero out, map into userspace
+
+            // This is the starting virt addr within user proc that we'll map any shm into
+            const MMAP_BASE: usize = 0x0000_4000_0000_0000;
+
+            let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
+            let mut procs = PROC.get().unwrap().lock();
+            let curr_proc = procs
+                .iter_mut()
+                .find(|p| p.tcb.lock().id == curr_thread_id)
+                .unwrap();
+
+            let mut boot_info = BOOT_INFO.get().unwrap().lock();
+            // not seeing any prints after here???
+            let mut mapper = unsafe {
+                OffsetPageTable::new(
+                    curr_proc.page_table,
+                    VirtAddr::new(boot_info.physical_memory_offset),
+                )
+            };
+            let buffer_num_bytes = boot_info.screen.bytes_per_line * boot_info.screen.height;
+
+            let num_frames = buffer_num_bytes.div_ceil(4096);
+            // that's how many pages we'll have
+            let start_page = Page::containing_address(VirtAddr::new(MMAP_BASE as u64));
+            let end_page = start_page + num_frames as u64;
+
+            let mut backbuffer_frames = Vec::new();
+            for page in Page::range(start_page, end_page) {
+                let frame = boot_info
+                    .allocator
+                    .allocate_frame()
+                    .expect("proc_init: out of mem");
+
+                backbuffer_frames.push(frame);
+
+                let frame_ptr: *mut u8 = VirtAddr::new(
+                    frame.start_address().as_u64() + boot_info.physical_memory_offset,
+                )
+                .as_mut_ptr();
+                // clear frame
+                unsafe {
+                    core::ptr::write_bytes(frame_ptr, 0, 4096);
+                }
+                let mapper_flush = unsafe {
+                    mapper
+                        .map_to(
+                            page,
+                            frame,
+                            PageTableFlags::WRITABLE
+                                | PageTableFlags::PRESENT
+                                | PageTableFlags::USER_ACCESSIBLE,
+                            &mut boot_info.allocator,
+                        )
+                        .expect("(fixed offset mapping): unable to map frame")
+                };
+                mapper_flush.flush();
+            }
+
+            curr_proc.backbuffer_frames = Some(backbuffer_frames);
+
+            // Fill in user passed in FrameBufferInfo struct
+            let user_window_info = unsafe { &mut *(arg1 as *mut UserWindow) };
+            user_window_info.base_addr = MMAP_BASE as u64;
+            user_window_info.width = boot_info.screen.width;
+            user_window_info.height = boot_info.screen.height;
+            user_window_info.bytes_per_pixel = boot_info.screen.bytes_per_pixel;
+            user_window_info.bytes_per_line = boot_info.screen.bytes_per_line;
+        }
+        SysCallKind::GraphicsFrameReady => {
+            // we notify compositor that we are ready for a paint
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.unblock_task(3);
+        }
+        SysCallKind::Sleep => {
+            // arg1: ms
+            nano_sleep((arg1 * 1_000_000) as u64);
         }
         SysCallKind::Alloc => {
             let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
@@ -302,6 +393,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
 pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char, argc: usize) {
     let binary = match program.to_str().unwrap() {
         "echo" => ECHO_ELF,
+        "xiangqi" => XIANGQI_ELF,
         _ => {
             panic!("unrecognized program")
         }
@@ -438,9 +530,17 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::registers::control::Cr2;
 
     serial_println!("EXCEPTION: PAGE FAULT");
-    serial_println!("Accessed Address: {:?}", Cr2::read());
-    serial_println!("Error Code: {:?}", error_code);
-    serial_println!("{:#?}", stack_frame);
+
+    serial_println!(
+        r#"EXCEPTION: PAGE FAULT
+                    Accessed Address: {:?}
+                    Error Code: {:?}
+                    {:#?}"#,
+        Cr2::read(),
+        error_code,
+        stack_frame
+    );
+
     hlt_loop();
 }
 

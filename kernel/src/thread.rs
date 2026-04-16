@@ -17,7 +17,9 @@ use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
 use lazy_static::lazy_static;
 use x86_64::{
     instructions::interrupts::without_interrupts,
-    structures::paging::{FrameAllocator, Mapper, Page, PageSize, PageTableFlags, Size4KiB},
+    structures::paging::{
+        FrameAllocator, Mapper, Page, PageSize, PageTableFlags, Size2MiB, Size4KiB,
+    },
     VirtAddr,
 };
 
@@ -31,6 +33,7 @@ pub enum BlockReason {
     Paused,
     Sleep(u64), // sleep expiry
     Terminated(u8),
+    CompositorWait,
 }
 
 #[repr(C)]
@@ -55,7 +58,7 @@ pub struct ThreadControlBlock {
     pub time_slice_remaining: usize, // resets to 100 ms upon context switch
 }
 
-const KERNEL_STACK_SIZE: usize = 1 * Size4KiB::SIZE as usize;
+const KERNEL_STACK_SIZE: usize = 1 * Size2MiB::SIZE as usize;
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn task_startup_hook() {
@@ -197,7 +200,7 @@ impl Scheduler {
             return_addr,
             None,
             None,
-            None
+            None,
         )));
         self.threads.push(new_thread);
 

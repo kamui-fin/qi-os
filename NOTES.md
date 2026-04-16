@@ -1,11 +1,18 @@
-# Minimal Bootloader
+# Roadmap
 
-## Procedure
-
-- real -> protected mode
-- setup valid GDT 
-- flip Protection Enable bit in CR0
-- Far jump to clear CPU pre-fetch queue of 16-bit instructions
-- setup stack
-- init segment registers to 0 always
-- setup page table
+- Kernel debugger (quit & dump useful info on key press)
+    -> see https://gitlab.com/bztsrc/minidbg
+- IPC
+    - Shared memory 
+    - Video memory access (compositor -> vram directly)
+    - Message passing, streams, or sockets
+- Compositing
+- More concurrency:
+    - pthreads API + TLS
+    - mutex / semaphore APIs
+    - SMP (for engine)
+- Filesystem
+    - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
+    - FAT
+- Shell
+- Sound

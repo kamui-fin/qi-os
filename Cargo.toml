@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["kernel", "bootloader", "userland"]
+members = ["kernel", "bootloader", "userland", "common"]
 resolver = "2"
 
 [dependencies]

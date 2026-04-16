@@ -1,6 +1,3 @@
-// Don't forget TLB flush upon Proc <-> Proc context switch
-// Spawn instead of fork
-
 use core::arch::naked_asm;
 use core::ffi::{c_str, CStr};
 use core::num;
@@ -27,10 +24,11 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::{memory::BootInfoFrameAllocator, thread::ThreadControlBlock};
+use crate::{memory::BumpAllocator, thread::ThreadControlBlock};
 use crate::{serial_println, BOOT_INFO};
 
 pub static ECHO_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_echo"));
+pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xiangqi"));
 
 pub static PID: AtomicU64 = AtomicU64::new(1 << 16);
 
@@ -42,6 +40,7 @@ pub struct ProcessControlBlock<'a> {
     pub heap_start: VirtAddr,
     pub heap_end: VirtAddr,
     pub name: &'static str,
+    pub backbuffer_frames: Option<Vec<PhysFrame>>,
 }
 
 const USER_STACK_SIZE: usize = 64 * 1024;
@@ -84,6 +83,7 @@ impl<'a> ProcessControlBlock<'a> {
         argc: usize,
         program: &'static CStr,
     ) -> Self {
+        serial_println!("Creating process!");
         // Paging, start with kernel mapped
         let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
 
@@ -93,7 +93,10 @@ impl<'a> ProcessControlBlock<'a> {
         let l4_virt = VirtAddr::new(cr3 + boot_info.physical_memory_offset);
         let page_table: &mut PageTable = unsafe { &mut *l4_virt.as_mut_ptr() };
 
-        let active_l4 = boot_info.page_table.level_4_table();
+        let active_l4 = unsafe {
+            &mut *((boot_info.page_table_address + boot_info.physical_memory_offset)
+                as *mut PageTable)
+        };
         for i in 0..512 {
             if i < 256 {
                 page_table[i] = PageTableEntry::new();
@@ -104,6 +107,7 @@ impl<'a> ProcessControlBlock<'a> {
         let mut mapper = unsafe {
             OffsetPageTable::new(page_table, VirtAddr::new(boot_info.physical_memory_offset))
         };
+
         // Then map the User Stack: High up at e.g. 0x0000_7FFF_FFFF_0000 (USER BIT SET)
         let stack_top = VirtAddr::new(0x0000_7FFF_FFFF_0000);
         let stack_pages = USER_STACK_SIZE / 4096;
@@ -342,6 +346,7 @@ impl<'a> ProcessControlBlock<'a> {
             heap_start,
             heap_end: heap_start,
             name: program.to_str().unwrap(),
+            backbuffer_frames: None,
         }
     }
 }

@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 format_no_std = "1.2.0"
+common = { path = "../common" }
+embedded-graphics = "0.8.2"
 
 [build-dependencies]
 cc = "1.0"
