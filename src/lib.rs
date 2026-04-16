@@ -1,16 +1,30 @@
 #![no_std]
 
+use crate::position::Position;
+
 extern crate alloc;
 
 pub mod board;
+use board::Board;
 pub mod piece;
 pub mod position;
-
 
 pub const RED: Color = Color::Red;
 pub const BLACK: Color = Color::Black;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GameResult {
+    /// The game is not finished, and the game is still in play.
+    Continuing(Board),
+    
+    Victory(Color),
+    
+    Draw,
 
+    Stalemate,
+    
+    IllegalMove(Move),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Color{
@@ -28,5 +42,12 @@ impl core::ops::Not for Color {
             Self::Black => Self::Red,
         }
     }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Move{
+
+    Piece(Position, Position),
+
+    Resign,
 }
 

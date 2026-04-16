@@ -1,7 +1,9 @@
 use crate::{piece::{Piece, PieceType}, position::Position};
 extern crate alloc;
 use super::*;
-use core::panic;
+use core::{panic};
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub const MAX_MOVES: u8 = 17;
 
@@ -20,7 +22,7 @@ pub const BLACK_PALACE: [Position; 9] =
 
 impl Default for Board {
     fn default() -> Self {
-        let board = Board::empty();
+        let mut board = Board::empty();
         
         // manually setting red pieces
         board.set_piece(Piece { piece_type: PieceType::Rook,     pos: Position::new(0, 0), color: RED });
@@ -72,6 +74,34 @@ pub struct Board {
 
 impl Board {
 
+    pub fn move_piece(&self, from: Position, to: Position) -> Self {
+        let mut result = *self;
+
+        if from.is_off_board() || to.is_off_board() {
+            return result;
+        }
+        let from_point = from.to_board_index();
+        let to_point = to.to_board_index();
+        result.points[to_point] = Some(self.get_piece(from).expect("move_piece: from square should always contain a piece").move_to(to));    
+        result.points[from_point] = None;
+    
+        result
+    }
+
+    pub(crate) fn is_legal_move(&self, m: Move, player_color: Color) -> bool {
+        match m {
+            Move::Piece(from, to) => match self.get_piece(from) {
+                Some(piece) => {
+                    piece.is_legal_move(to, self)
+                        && piece.color == player_color
+                        && !self.move_piece(from, to).is_in_check(player_color)
+                }
+                _ => false,
+            },
+            Move::Resign => true,
+        }
+    }
+
     pub fn type_at_pos(&self, pos: Position) -> PieceType {
         self.points[self.pos_to_index(pos)].unwrap().piece_type
 
@@ -84,10 +114,8 @@ impl Board {
         }
     }
 
-    pub fn set_piece(mut self, piece: Piece) -> Self {
+    pub fn set_piece(&mut self, piece: Piece) {
         self.points[self.pos_to_index(piece.pos)] = Some(piece);
-
-        self
     }
     
     pub fn pos_to_index(&self, pos: Position) -> usize {
@@ -100,10 +128,9 @@ impl Board {
 
     //checks if point on board has ally piece 
     pub fn has_ally_piece(&self, pos: Position, self_color: Color) -> bool {
-        match  self.points[self.pos_to_index(pos)] {
+        match self.points[self.pos_to_index(pos)] {
             Some(piece) if piece.color == self_color => true,
             _ => false,
-            
         }
     }
 
@@ -123,10 +150,27 @@ impl Board {
         self.get_piece(pos).is_none()
     }
 
-    pub fn get_legal_moves(&self, pos: Position) -> MoveList {
-
+    #[inline]
+    fn get_current_player_color(&self) -> Color {
+        self.turn
     }
 
+    #[inline]
+    pub fn get_legal_moves(&self) -> Vec<Move> {
+        let mut result = vec![];
+        let color = self.get_current_player_color();
+        for p in &self.points {
+            if let Some(piece) = p {
+                if piece.color == color {
+                    result.extend(piece.get_legal_moves(self))
+                }
+            }
+        }
+
+        result
+    }
+
+    #[inline]
     pub fn get_turn_color(&self) -> Color {
         self.turn
     }
@@ -135,23 +179,85 @@ impl Board {
         (pos1.get_col() == pos2.get_col()) && (pos1.get_row() == pos2.get_row())
     }
 
+    pub fn is_threatened(&self, pos: Position, ally_color: Color) -> bool {
+        for point in self.points {
+            if let Some(piece) = point {
+                let point_pos = piece.pos;
+                if !point_pos.is_orthogonal_to(pos)
+                && !point_pos.is_diagonal_to(pos)
+                && !point_pos.is_horse_move(pos)
+                {
+                    continue
+                }
+                if piece.color == ally_color {
+                    continue
+                }
+                if piece.is_legal_move(pos, self) {
+                    return true;
+                }
+            } else {continue}              
+        }
+        false
+    }
+
+    #[inline]
+    pub fn change_turn(mut self) -> Self {
+        self.turn = !self.turn;
+        self
+    }
+
+    pub fn is_in_check(&self, color: Color) -> bool {
+        self.is_threatened(self.get_general_pos(color), color)
+    }
+
+     pub fn is_checkmate(&self) -> bool {
+        self.is_in_check(self.get_current_player_color()) && self.get_legal_moves().is_empty()
+    }
+
     pub fn get_general_pos(&self, color: Color) -> Position {
         match color {
             Color::Red => {
                 for pos in RED_PALACE {
-                    if self.type_at_pos(pos) == PieceType::General{
-                        return pos
-                    }
+                    if let Some(piece) = self.get_piece(pos){
+                        if piece.piece_type == PieceType::General{
+                            return pos
+                        } else {continue} 
+                    } else {continue}
                 }
             }
             Color::Black => {
                 for pos in BLACK_PALACE {
-                    if self.type_at_pos(pos) == PieceType::General{
-                        return pos
-                    }
+                    if let Some(piece) = self.get_piece(pos){
+                        if piece.piece_type == PieceType::General{
+                            return pos
+                        } else {continue} 
+                    } else {continue}
                 }
             }
         }
         panic!()
-    }  
-} 
+    }
+
+    /// Play a move and confirm it is legal.
+    pub fn play_move(&self, m: Move) -> GameResult {
+        let current_color = self.get_turn_color();
+        
+        match m {
+            Move::Piece(from, to) => {
+                if self.is_legal_move(m, current_color) {
+                    let next_turn = self.move_piece(from, to).change_turn();
+                    if next_turn.is_checkmate() {
+                        GameResult::Victory(current_color)
+                    } else if next_turn.is_stalemate() {
+                        GameResult::Victory(!current_color)
+                    } else {
+                        GameResult::Continuing(next_turn)
+                    }
+                } else {
+                    GameResult::IllegalMove(m)
+                }
+            },
+            Move::Resign => GameResult::Victory(!current_color),
+        }
+    }
+}

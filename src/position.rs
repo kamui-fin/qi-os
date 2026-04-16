@@ -10,6 +10,10 @@ pub struct Position {
 
 impl Position {
 
+    pub const fn to_board_index(self) -> usize {
+        (self.row as usize) * 9 + (self.col as usize)
+    }
+
     #[inline]
     pub const fn new(row: i8, col: i8) -> Self {
         Self { row, col }
@@ -24,31 +28,21 @@ impl Position {
     /// Is this position NOT a valid spot on the board?
     #[inline]
     pub fn is_off_board(&self) -> bool {
-        self.row < 0 || self.row > 8 || self.col < 0 || self.col > 9
+        self.row < 0 || self.row > 9 || self.col < 0 || self.col > 8
     }
 
-    /// Get the row number of the position.
-    /// This can be any of 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
-    #[inline]
     pub fn get_row(&self) -> i8 {
         self.row
     }
 
-    pub fn add_row(&self, step: i8) -> Self {
-        let mut result = *self;
-        result.row += step;
-        result
+    fn add_row(&mut self, step: i8) {
+        self.row += step;
     }
 
-    pub fn add_col(&self, step: i8) -> Self {
-        let mut result = *self;
-        result.col += step;
-        result
+    fn add_col(&mut self, step: i8) {
+       self.col += step;   
     }
 
-    ///Get the column of the position 
-    /// This can be any of 0,1,2,3,4,5,6,7
-    #[inline]
     pub fn get_col(&self) -> i8 {
         self.col
     }
@@ -151,12 +145,13 @@ impl Position {
         } else if self.is_left_of(to_pos) {
             col_step = 1
         }
-        let accumulator = *self;
+        let mut accumulator = *self;
         let mut result = Vec::new();
         // iterate through the otthogonal distance between points and increase or decrease col/ row then push to Vec
         //just need to interate use '_'
         for _ in 0..self.orthogonal_distance(to_pos) {
-            accumulator.add_col(col_step).add_row(row_step);
+            accumulator.add_col(col_step);
+            accumulator.add_row(row_step);
             result.push(accumulator);
         }
         result
@@ -180,13 +175,14 @@ impl Position {
         } else if self.is_left_of(to_pos) {
             col_step = 1
         }
-        let accumulator = *self;
+        let mut accumulator = *self;
         let mut result = Vec::new();
         // iterate through the otthogonal distance between points and increase or decrease col/ row then push to Vec
         //just need to interate use '_'
         //same functon for orthogonals_to, since we add the row step and col step either way
         for _ in 0..self.diagonal_distance(to_pos) {
-            accumulator.add_col(col_step).add_row(row_step);
+            accumulator.add_col(col_step);
+            accumulator.add_row(row_step);
             result.push(accumulator);
         }
         result

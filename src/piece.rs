@@ -1,4 +1,4 @@
-use crate::{Color};
+use crate::{Color, Move};
 use crate::board::Board;
 use crate::position::Position;
 use alloc::vec::Vec;
@@ -24,10 +24,92 @@ pub struct Piece {
 }
 
 impl Piece {
+
+    pub fn move_to(&self, new_pos: Position) -> Self {
+        Piece { pos: new_pos, ..*self}
+    }   
+
     pub const fn new(color: Color, piece_type: PieceType, pos: Position) -> Self {
         Self {piece_type, color, pos}
     }
 
+    pub fn get_canidates(&self) -> Vec<Move> {
+        let mut canidates = Vec::new();
+        let pos = self.pos;
+
+        match self.piece_type {
+            PieceType::Advisor => {
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +1, pos.get_col() +1)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +1, pos.get_col() -1)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -1, pos.get_col() +1)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -1, pos.get_col() -1)));
+            }
+            PieceType::Cannon => {
+                let mut traveling: Vec<Position> = pos.orthogonals_to(Position::new(pos.get_row(), 8));
+                traveling.append(&mut pos.orthogonals_to(Position::new(pos.get_row(), 0)));
+                traveling.append(&mut pos.orthogonals_to(Position::new(0, pos.get_col())));
+                traveling.append(&mut pos.orthogonals_to(Position::new(9, pos.get_col())));
+
+                for p in traveling.iter() {
+                    canidates.push(Move::Piece(pos, *p));
+                }
+            }
+            PieceType::Elephant => {
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +2, pos.get_col() +2)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +2, pos.get_col() -2)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -2, pos.get_col() +2)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -2, pos.get_col() -2)));
+            }
+            PieceType::General => {
+                let up = pos.pawn_up(self.color);
+                let down = pos.pawn_down(self.color);
+                let right = pos.next_right();
+                let left = pos.next_left();
+                canidates.push(Move::Piece(pos,up));
+                canidates.push(Move::Piece(pos, down));
+                canidates.push(Move::Piece(pos,right));
+                canidates.push(Move::Piece(pos,left));
+            }
+            PieceType::Horse => {
+                canidates.push(Move::Piece(pos, pos.next_above().next_above().next_right()));
+                canidates.push(Move::Piece(pos, pos.next_above().next_above().next_left()));
+                canidates.push(Move::Piece(pos, pos.next_above().next_right().next_right()));
+                canidates.push(Move::Piece(pos, pos.next_above().next_left().next_left()));
+                canidates.push(Move::Piece(pos, pos.next_below().next_below().next_right()));
+                canidates.push(Move::Piece(pos, pos.next_below().next_below().next_left()));
+                canidates.push(Move::Piece(pos, pos.next_below().next_right().next_right()));
+                canidates.push(Move::Piece(pos, pos.next_below().next_left().next_left()));
+            }
+            PieceType::Pawn => {
+                let up = pos.pawn_up(self.color);
+                let down = pos.pawn_down(self.color);
+                let right = pos.next_right();
+                let left = pos.next_left();
+                canidates.push(Move::Piece(pos, up));
+                canidates.push(Move::Piece(pos, down));
+                canidates.push(Move::Piece(pos, right));
+                canidates.push(Move::Piece(pos, left));
+            }
+            PieceType::Rook => {
+                let mut traveling: Vec<Position> = pos.orthogonals_to(Position::new(pos.get_row(), 8));
+                traveling.append(&mut pos.orthogonals_to(Position::new(pos.get_row(), 0)));
+                traveling.append(&mut pos.orthogonals_to(Position::new(0, pos.get_col())));
+                traveling.append(&mut pos.orthogonals_to(Position::new(9, pos.get_col())));
+
+                for p in traveling.iter() {
+                    canidates.push(Move::Piece(pos,*p));
+                }
+            }
+        }
+        canidates
+    }
+
+    pub fn get_legal_moves(&self, board: &Board) -> Vec<Move> {
+            self.get_canidates()
+            .into_iter()
+            .filter(|&x| board.is_legal_move(x, self.color))
+            .collect::<Vec<Move>>()
+    }
 
     pub fn is_legal_move(&self, new_pos: Position, board: &Board) -> bool {
         // rule these out first as postion helpers don't check for legality
@@ -37,6 +119,9 @@ impl Piece {
 
         match self.piece_type {
              PieceType::General => {
+                if !new_pos.is_in_palace(self.color){
+                    return false;
+                }
                 let traveling: Vec<Position>;
                 match self.color {
                     Color::Red => {
@@ -89,7 +174,7 @@ impl Piece {
                     return false;
                 }
                 if board.has_enemy_piece(new_pos, self.color){
-                    let mut jmp_count = 0;
+                    let mut jmp_count: u8 = 0;
                     let mut traveling: Vec<Position> = self.pos.orthogonals_to(new_pos);
                     traveling.pop();
 
@@ -98,7 +183,7 @@ impl Piece {
                             jmp_count += 1;
                         } else {continue;}
                     }
-                    if jmp_count > 1{
+                    if jmp_count != 1 {
                         return false;
                     } else {return true}
                 } else {
@@ -132,7 +217,6 @@ impl Piece {
                 }
                 return true;
             }
-            // is this not the most elegant code the worlds ever seen lmao
              PieceType::Horse => {
                 
                 if !self.pos.is_horse_move(new_pos) {
