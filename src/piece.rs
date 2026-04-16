@@ -1,4 +1,4 @@
-use crate::{BLACK, Color, Move, RED, piece};
+use crate::{BLACK, Color, Move, RED};
 use crate::board::Board;
 use crate::position::Position;
 use alloc::vec::Vec;
@@ -35,7 +35,7 @@ impl TryFrom<char> for Piece {
         match c {
 
             'P' => Ok(Piece { piece_type: PieceType::Pawn,     pos: TEMP_POS, color: RED}),
-            'H' => Ok(Piece { piece_type: PieceType::Horse,    pos: TEMP_POS, color: RED}),
+            'N' => Ok(Piece { piece_type: PieceType::Horse,    pos: TEMP_POS, color: RED}),
             'B' => Ok(Piece { piece_type: PieceType::Elephant, pos: TEMP_POS, color: RED}),
             'R' => Ok(Piece { piece_type: PieceType::Rook,     pos: TEMP_POS, color: RED}),
             'C' => Ok(Piece { piece_type: PieceType::Cannon,   pos: TEMP_POS, color: RED}),
@@ -43,7 +43,7 @@ impl TryFrom<char> for Piece {
             'A' => Ok(Piece { piece_type: PieceType::Advisor,  pos: TEMP_POS, color: RED}),
             
             'p' => Ok(Piece { piece_type: PieceType::Pawn,     pos: TEMP_POS, color: BLACK}),
-            'h' => Ok(Piece { piece_type: PieceType::Horse,    pos: TEMP_POS, color: BLACK}),
+            'n' => Ok(Piece { piece_type: PieceType::Horse,    pos: TEMP_POS, color: BLACK}),
             'b' => Ok(Piece { piece_type: PieceType::Elephant, pos: TEMP_POS, color: BLACK}),
             'r' => Ok(Piece { piece_type: PieceType::Rook,     pos: TEMP_POS, color: BLACK}),
             'c' => Ok(Piece { piece_type: PieceType::Cannon,   pos: TEMP_POS, color: BLACK}),

@@ -3,9 +3,7 @@ use super::*;
 use crate::piece::Piece;
 use crate::position::Position;
 
-pub fn is_upper(c: char) -> bool {
-    c.is_ascii_uppercase()
-}
+
 ///TODO: implement halfmove clock logic for effective and progress rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoardParseError {
@@ -101,7 +99,7 @@ impl core::str::FromStr for Board {
         let fullmove = fullmove_str
             .parse::<u8>()
             .map_err(|_| BoardParseError::InvalidFullmoveNumber)?;
-        if board.get_full_move() == 0 {
+        if fullmove == 0 {
             return Err(BoardParseError::FullmoveMustBePositive);
         }
 

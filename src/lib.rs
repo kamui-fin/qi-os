@@ -8,6 +8,7 @@ pub mod board;
 use board::Board;
 pub mod piece;
 pub mod position;
+pub mod fen;
 
 pub const RED: Color = Color::Red;
 pub const BLACK: Color = Color::Black;
@@ -51,3 +52,5 @@ pub enum Move{
     Resign,
 }
 
+#[cfg(test)]
+mod testpositions;
