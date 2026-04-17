@@ -45,9 +45,9 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
 
     // Circle with blue fill and no stroke with a translation applied
     /* Circle::new(Point::new(10, 20), 30)
-        .translate(Point::new(20, 10))
-        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLUE))
-        .draw(&mut display); */
+    .translate(Point::new(20, 10))
+    .into_styled(PrimitiveStyle::with_fill(Rgb565::BLUE))
+    .draw(&mut display); */
 
     syscall_notify_frame_update();
 

@@ -3,6 +3,7 @@
 #![feature(step_trait)]
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use alloc::{task, vec};
 use conquer_once::spin::OnceCell;
@@ -13,12 +14,14 @@ use crossbeam_queue::ArrayQueue;
 use elf::abi::PT_LOAD;
 use elf::endian::{AnyEndian, LittleEndian};
 use elf::ElfBytes;
+use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     prelude::*,
     text::Text,
 };
+use futures_util::StreamExt;
 use kernel::allocator::init_heap;
 use kernel::graphics::Screen;
 use kernel::interrupts::spawn_proc;
@@ -27,6 +30,7 @@ use kernel::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::proc::{ProcessControlBlock, ECHO_ELF};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
+use kernel::task::tty::{init_console_char_queue, Color, ColorCode, ConsoleStream, ScreenChar};
 use kernel::task::Task;
 use kernel::thread::{
     block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
@@ -38,6 +42,7 @@ use kernel::{
     RawBootInfo, BOOT_INFO, PROC,
 };
 use spin::Mutex;
+use volatile::Volatile;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -99,6 +104,8 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
         kernel::pit::init_pit();
 
+        init_console_char_queue();
+
         unsafe {
             MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
             CURR_THREAD_PTR = MAIN_THREAD;
@@ -109,17 +116,132 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
 
+    // Why does this get printed twice??
+    println!("Welcome to Qi OS!");
+    println!("Hope this doesn't get printed twice");
+
     {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn(2, cleaner_task as *const ());
+        // scheduler.spawn(2, cleaner_task as *const ());
         // For now, compositor is just a kernel task
-        scheduler.spawn(3, compositor_task as *const ());
+        // scheduler.spawn(3, compositor_task as *const ());
+        scheduler.spawn(4, async_executor_task as *const ());
     }
 
-    let args = [c"test".as_ptr()];
-    spawn_proc(c"xiangqi", args.as_ptr(), 1);
+    /* let args = [c"test".as_ptr()];
+    spawn_proc(c"xiangqi", args.as_ptr(), 1); */
 
     hlt_loop();
+}
+
+fn async_executor_task() {
+    let mut executor = Executor::new(); // new
+    executor.spawn(Task::new(print_keypresses()));
+    executor.spawn(Task::new(render_tty_buffer()));
+    executor.run();
+}
+
+const BUFFER_HEIGHT: usize = 25;
+const BUFFER_WIDTH: usize = 50;
+
+struct ConsoleRenderer {
+    buffer: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
+    column_position: usize,
+}
+
+impl ConsoleRenderer {
+    fn new() -> Self {
+        Self {
+            buffer: [[ScreenChar::default(); BUFFER_WIDTH]; BUFFER_HEIGHT],
+            column_position: 0,
+        }
+    }
+    fn new_line(&mut self) {
+        for row in 1..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
+                let character = self.buffer[row][col];
+                self.buffer[row - 1][col] = character;
+            }
+        }
+        self.clear_row(BUFFER_HEIGHT - 1);
+        self.column_position = 0;
+    }
+
+    fn clear_row(&mut self, row: usize) {
+        for col in 0..BUFFER_WIDTH {
+            self.buffer[row][col] = ScreenChar::default();
+        }
+    }
+
+    pub fn write_byte(&mut self, byte: u8) {
+        match byte {
+            b'\n' => self.new_line(),
+            byte => {
+                if self.column_position >= BUFFER_WIDTH {
+                    self.new_line();
+                }
+
+                let row = BUFFER_HEIGHT - 1;
+                let col = self.column_position;
+
+                let default_color = ColorCode::new(Color::Green, Color::Black);
+                self.buffer[row][col] = ScreenChar {
+                    ascii_character: byte,
+                    color_code: default_color,
+                };
+                self.column_position += 1;
+            }
+        }
+    }
+
+    pub fn paint(&mut self) {
+        // holding tihs lock throughout render pass might be bad... isolate out screen lock
+        let boot_info = BOOT_INFO.get().unwrap().lock();
+        let mut screen = boot_info.screen;
+
+        let line_height = 5;
+        let font = &FONT_6X10;
+
+        let style = MonoTextStyleBuilder::new()
+            .font(font)
+            .text_color(Rgb565::WHITE)
+            .background_color(Rgb565::BLACK)
+            .build();
+
+        for row in 0..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
+                let y = row * (font.character_size.height + line_height) as usize;
+                let x = col * (font.character_size.width + font.character_spacing) as usize;
+
+                let character = self.buffer[row][col];
+
+                let mut buf = [0u8; 1];
+                buf[0] = character.ascii_character;
+                let string = core::str::from_utf8(&buf).unwrap_or(" ");
+
+                // serial_println!("{string} at ({y}, {x})");
+                Text::new(&string, Point::new(x as i32, y as i32), style)
+                    .draw(&mut screen)
+                    .unwrap();
+            }
+        }
+    }
+}
+
+impl Default for ConsoleRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn render_tty_buffer() {
+    let mut renderer = ConsoleRenderer::new();
+    let mut console_chars = ConsoleStream::new();
+    while let Some(char) = console_chars.next().await {
+        serial_print!("{}", char.ascii_character as char);
+        renderer.write_byte(char.ascii_character);
+        renderer.paint();
+    }
 }
 
 fn compositor_task() {
@@ -129,7 +251,10 @@ fn compositor_task() {
         block_task(BlockReason::CompositorWait);
 
         let procs = PROC.get().unwrap().lock();
-        serial_println!("[compositor] Unblocked, going thru {} procs", procs.iter().len());
+        serial_println!(
+            "[compositor] Unblocked, going thru {} procs",
+            procs.iter().len()
+        );
 
         // paint each proccess backbuffer, for now there's no z-index
         for curr_proc in procs.iter() {

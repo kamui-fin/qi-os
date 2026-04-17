@@ -26,7 +26,6 @@ pub mod proc;
 pub mod serial;
 pub mod task;
 pub mod thread;
-pub mod vga_buffer;
 
 pub static BOOT_INFO: OnceCell<Mutex<BootInfo>> = OnceCell::uninit();
 pub static PROC: OnceCell<Mutex<Vec<ProcessControlBlock>>> = OnceCell::uninit();

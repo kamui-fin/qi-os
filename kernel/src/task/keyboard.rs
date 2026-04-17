@@ -1,4 +1,4 @@
-use crate::println;
+use crate::{println, serial_println};
 use conquer_once::spin::OnceCell;
 use core::{
     pin::Pin,
@@ -23,7 +23,7 @@ pub(crate) fn add_scancode(scancode: u8) {
             WAKER.wake();
         }
     } else {
-        println!("WARNING: scancode queue uninitialized");
+        serial_println!("WARNING: scancode queue uninitialized");
     }
 }
 

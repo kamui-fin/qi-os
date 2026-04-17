@@ -34,6 +34,11 @@ impl Screen {
     }
 
     pub fn set_pixel_in(&mut self, position: Point, color: Rgb565) {
+        if position.x < 0 || position.x >= self.width as i32 ||
+            position.y < 0 || position.y >= self.height as i32 {
+             return;
+         }
+
         // calculate offset to first byte of pixel
         let byte_offset = {
             // use stride (bytes_per_line) to calculate byte offset of target line
