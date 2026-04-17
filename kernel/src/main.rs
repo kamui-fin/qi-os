@@ -9,6 +9,7 @@ use alloc::{task, vec};
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use core::ffi::c_char;
+use core::intrinsics::copy_nonoverlapping;
 use core::panic::PanicInfo;
 use crossbeam_queue::ArrayQueue;
 use elf::abi::PT_LOAD;
@@ -21,7 +22,7 @@ use embedded_graphics::{
     prelude::*,
     text::Text,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use kernel::allocator::init_heap;
 use kernel::graphics::Screen;
 use kernel::interrupts::spawn_proc;
@@ -240,6 +241,13 @@ async fn render_tty_buffer() {
     while let Some(char) = console_chars.next().await {
         serial_print!("{}", char.ascii_character as char);
         renderer.write_byte(char.ascii_character);
+
+        // flush rest of queue
+        while let Some(Some(char)) = console_chars.next().now_or_never() {
+        serial_print!("{}", char.ascii_character as char);
+            renderer.write_byte(char.ascii_character);
+        }
+
         renderer.paint();
     }
 }

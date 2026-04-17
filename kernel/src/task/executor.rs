@@ -1,8 +1,11 @@
+use crate::thread::{block_task, SCHEDULER};
+
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::task::Waker;
 use core::task::{Context, Poll};
 use crossbeam_queue::ArrayQueue;
+use x86_64::instructions::interrupts::{self, enable_and_hlt};
 
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,
@@ -62,11 +65,9 @@ impl Executor {
     }
 
     fn sleep_if_idle(&self) {
-        use x86_64::instructions::interrupts::{self, enable_and_hlt};
-
         interrupts::disable();
         if self.task_queue.is_empty() {
-            enable_and_hlt();
+            block_task(crate::thread::BlockReason::Paused);
         } else {
             interrupts::enable();
         }
@@ -88,6 +89,9 @@ impl TaskWaker {
 
     fn wake_task(&self) {
         self.task_queue.push(self.task_id).expect("task_queue full");
+
+        let mut sched = SCHEDULER.lock();
+        sched.unblock_task(4);
     }
 }
 
