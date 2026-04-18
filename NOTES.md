@@ -1,14 +1,19 @@
 # Roadmap
 
-- TTY:
-    - tty1: read-only log buffer
-    - tty2: normal terminal
+- Mouse input
+- Time
 - User heap
 - Unit + Integraiton testing setup
 - Shell
-- Mouse input + Async integration
+- TTY:
+    - tty1: read-only log buffer
+    - tty2: normal terminal
 - Stack smash protector
-- Time
+- More concurrency:
+    - SMP (for engine)
+        - LAPIC/IOAPIC/ACPI
+    - mutex / semaphore APIs
+    - pthreads API + TLS
 - Filesystem
     - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
     - FAT
@@ -16,17 +21,11 @@
         - PCIe enumeration
 - IPC
     - Shared memory 
-    - Video memory access (compositor -> vram directly)
     - Message passing, streams, or sockets
 - Compositing:
     - Wallpaper
     - Floating windows
     - Borders
-- More concurrency:
-    - pthreads API + TLS
-    - mutex / semaphore APIs
-    - SMP (for engine)
-        - LAPIC/IOAPIC/ACPI
 - Sound
 - Kernel debugger (quit & dump useful info on key press)
     -> see https://gitlab.com/bztsrc/minidbg

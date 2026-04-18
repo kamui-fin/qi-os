@@ -10,6 +10,7 @@ use core::sync::atomic::AtomicUsize;
 
 use crate::hlt_loop;
 use crate::lock::NEEDS_RESCHEDULE;
+use crate::mouse::GenericPs2Packet;
 use crate::print;
 use crate::println;
 use crate::proc::ProcessControlBlock;
@@ -34,6 +35,7 @@ use futures_util::stream::select_with_strategy;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
+use x86_64::instructions::port::Port;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::structures::paging::FrameAllocator;
@@ -42,6 +44,7 @@ use x86_64::structures::paging::OffsetPageTable;
 use x86_64::structures::paging::Page;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::structures::paging::Size4KiB;
+use x86_64::structures::port::PortRead;
 use x86_64::VirtAddr;
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -63,6 +66,7 @@ lazy_static! {
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault.set_handler_fn(gpf_handler);
+        idt[InterruptIndex::PS2.as_usize()].set_handler_fn(mouse_interrupt_handler);
 
         unsafe {
             let handler_addr = VirtAddr::new(syscall_entry as usize as u64);
@@ -434,6 +438,7 @@ extern "x86-interrupt" fn double_fault_handler(
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
+    PS2 = PIC_1_OFFSET + 12,
 }
 
 impl InterruptIndex {
@@ -497,6 +502,59 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     switch_if_needed();
 }
 
+enum MouseDataState {
+    WaitingForByte1,
+    WaitingForByte2(u8),
+    WaitingForByte3(u8, u8),
+}
+
+static mut ps2_mouse_state: MouseDataState = MouseDataState::WaitingForByte1;
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // i'm just lazy rn will refactor this massive unsafe block later
+    unsafe {
+        let mut status_port = Port::<u8>::new(0x64);
+        let mut status = status_port.read();
+        while status & 0x1 != 0 {
+            let mut data_port = Port::<u8>::new(0x60);
+            let mouse_in = data_port.read();
+            if status & (1 << 5) != 0 {
+                match ps2_mouse_state {
+                    MouseDataState::WaitingForByte1 => {
+                        ps2_mouse_state = MouseDataState::WaitingForByte2(mouse_in);
+                    }
+                    MouseDataState::WaitingForByte2(first_byte) => {
+                        ps2_mouse_state = MouseDataState::WaitingForByte3(first_byte, mouse_in);
+                    }
+                    MouseDataState::WaitingForByte3(first_byte, second_byte) => {
+                        // we have the full data now
+                        let packet = [first_byte, second_byte, mouse_in];
+                        let packet = GenericPs2Packet::new(packet);
+
+                        // *   The top two bits of the first byte (values 0x80 and 0x40) supposedly show Y and X overflows,
+                        if first_byte & 0x80 != 0 || first_byte & 0x40 != 0 {
+                            // discard the packet
+                        } else {
+                            // send packet to ring buffer
+                            crate::task::mouse::add_packet(packet);
+                        }
+
+                        /* Bit number 4 of the first byte (value 0x10) indicates that delta X (the 2nd byte) is a negative number, if it is set. This means that you should OR 0xFFFFFF00 onto the value of delta X, as a sign extension (if using 32 bits).
+                        The bottom 3 bits of the first byte indicate whether the middle, right, or left mouse buttons are currently being held down, if the respective bit is set. Middle = bit 2 (value=4), right = bit 1 (value=2), left = bit 0 (value=1). */
+                        ps2_mouse_state = MouseDataState::WaitingForByte1;
+                    }
+                }
+            }
+            status = status_port.read();
+        }
+    }
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::PS2.as_u8());
+    }
+}
+
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use spin::Mutex;
@@ -512,10 +570,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 
     let mut keyboard = KEYBOARD.lock();
-    let mut port = Port::new(0x60);
+    let mut port = Port::<u8>::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };
-    crate::task::keyboard::add_scancode(scancode); // new
+    crate::task::keyboard::add_scancode(scancode);
 
     unsafe {
         PICS.lock()

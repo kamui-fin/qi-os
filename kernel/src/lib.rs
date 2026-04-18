@@ -21,6 +21,7 @@ pub mod graphics;
 pub mod interrupts;
 pub mod lock;
 pub mod memory;
+pub mod mouse;
 pub mod pit;
 pub mod proc;
 pub mod serial;

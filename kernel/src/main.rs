@@ -15,6 +15,7 @@ use crossbeam_queue::ArrayQueue;
 use elf::abi::PT_LOAD;
 use elf::endian::{AnyEndian, LittleEndian};
 use elf::ElfBytes;
+use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_8X13};
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::{
@@ -31,6 +32,7 @@ use kernel::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::proc::{ProcessControlBlock, ECHO_ELF};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
+use kernel::task::mouse::print_mouse_movement;
 use kernel::task::tty::{init_console_char_queue, Color, ColorCode, ConsoleStream, ScreenChar};
 use kernel::task::Task;
 use kernel::thread::{
@@ -39,8 +41,8 @@ use kernel::thread::{
     MAIN_THREAD, SCHEDULER,
 };
 use kernel::{
-    allocator, hlt_loop, init, memory, println, serial, serial_print, serial_println, BootInfo,
-    RawBootInfo, BOOT_INFO, PROC,
+    allocator, hlt_loop, init, memory, mouse, println, serial, serial_print, serial_println,
+    BootInfo, RawBootInfo, BOOT_INFO, PROC,
 };
 use spin::Mutex;
 use volatile::Volatile;
@@ -100,12 +102,37 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         allocator::init_heap(&mut mapper, &mut boot_info.allocator)
             .expect("heap initialization failed");
 
+        init_console_char_queue();
+
+        // Xiangqi OS boot message
+        println!(
+            r#"
+$$\   $$\ $$\                                $$$$$$\  $$\        $$$$$$\   $$$$$$\  
+$$ |  $$ |\__|                              $$  __$$\ \__|      $$  __$$\ $$  __$$\ 
+\$$\ $$  |$$\  $$$$$$\  $$$$$$$\   $$$$$$\  $$ /  $$ |$$\       $$ /  $$ |$$ /  \__|
+ \$$$$  / $$ | \____$$\ $$  __$$\ $$  __$$\ $$ |  $$ |$$ |      $$ |  $$ |\$$$$$$\  
+ $$  $$<  $$ | $$$$$$$ |$$ |  $$ |$$ /  $$ |$$ |  $$ |$$ |      $$ |  $$ | \____$$\ 
+$$  /\$$\ $$ |$$  __$$ |$$ |  $$ |$$ |  $$ |$$ $$\$$ |$$ |      $$ |  $$ |$$\   $$ |
+$$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$$  |
+\__|  \__|\__| \_______|\__|  \__| \____$$ | \___$$$\ \__|       \______/  \______/ 
+                                  $$\   $$ |     \___|                              
+                                  \$$$$$$  |                                        
+                                   \______/                                         
+        "#
+        );
+        println!("[ OK ] Heap initialized");
+
         serial_println!("Qi OS booted up!\n");
         serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
 
         kernel::pit::init_pit();
+        println!("[ OK ] Timer setup");
 
-        init_console_char_queue();
+        unsafe {
+            mouse::init_ps2();
+            mouse::init_ps2_mouse();
+        }
+        println!("[ OK ] PS/2 Mouse initialized");
 
         unsafe {
             MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
@@ -117,10 +144,6 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
 
-    // Why does this get printed twice??
-    println!("Welcome to Qi OS!");
-    println!("Hope this doesn't get printed twice");
-
     {
         let mut scheduler = SCHEDULER.lock();
         // scheduler.spawn(2, cleaner_task as *const ());
@@ -129,6 +152,9 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         scheduler.spawn(4, async_executor_task as *const ());
     }
 
+    println!("[ OK ] Started threads + async executor");
+    println!("Ready!");
+
     /* let args = [c"test".as_ptr()];
     spawn_proc(c"xiangqi", args.as_ptr(), 1); */
 
@@ -136,14 +162,15 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 }
 
 fn async_executor_task() {
-    let mut executor = Executor::new(); // new
-    executor.spawn(Task::new(print_keypresses()));
-    executor.spawn(Task::new(render_tty_buffer()));
+    let mut executor = Executor::new();
+    // executor.spawn(Task::new(print_keypresses()));
+    // executor.spawn(Task::new(print_mouse_movement()));
+    // executor.spawn(Task::new(render_tty_buffer()));
     executor.run();
 }
 
-const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH: usize = 50;
+const BUFFER_HEIGHT: usize = 40;
+const BUFFER_WIDTH: usize = 150;
 
 struct ConsoleRenderer {
     buffer: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
@@ -200,12 +227,12 @@ impl ConsoleRenderer {
         let boot_info = BOOT_INFO.get().unwrap().lock();
         let mut screen = boot_info.screen;
 
-        let line_height = 5;
-        let font = &FONT_6X10;
+        let line_height = 3;
+        let font = &FONT_10X20;
 
         let style = MonoTextStyleBuilder::new()
             .font(font)
-            .text_color(Rgb565::WHITE)
+            .text_color(Rgb565::CSS_FOREST_GREEN)
             .background_color(Rgb565::BLACK)
             .build();
 
@@ -239,12 +266,9 @@ async fn render_tty_buffer() {
     let mut renderer = ConsoleRenderer::new();
     let mut console_chars = ConsoleStream::new();
     while let Some(char) = console_chars.next().await {
-        serial_print!("{}", char.ascii_character as char);
         renderer.write_byte(char.ascii_character);
-
         // flush rest of queue
         while let Some(Some(char)) = console_chars.next().now_or_never() {
-        serial_print!("{}", char.ascii_character as char);
             renderer.write_byte(char.ascii_character);
         }
 
