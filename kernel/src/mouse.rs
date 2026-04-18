@@ -1,4 +1,5 @@
 // PS/2 Mouse driver
+// TODO: scrolling
 
 use alloc::task::Wake;
 use bitflags::bitflags;

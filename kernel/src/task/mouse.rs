@@ -69,17 +69,18 @@ pub async fn print_mouse_movement() {
     use embedded_graphics::prelude::Point;
 
     let mut packets = Ps2PacketStream::new();
-    let mut x = 0;
-    let mut y = 0;
+    let mut x = 0 as i32;
+    let mut y = 0 as i32;
     while let Some(packet) = packets.next().await {
         let mut boot_info = BOOT_INFO.get().unwrap().lock();
         let mut screen = boot_info.screen;
 
         // draw cursor
-        x += packet.get_x();
-        y -= packet.get_y();
+        x += packet.get_x() as i32;
+        y -= packet.get_y() as i32;
 
-        // make sure to check out of bounds and stuff
+        x = x.clamp(0, screen.width as i32);
+        y = y.clamp(0, screen.height as i32);
 
         let point = Point::new(x as i32, y as i32);
 

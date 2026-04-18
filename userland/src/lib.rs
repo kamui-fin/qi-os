@@ -5,6 +5,18 @@
 
 use common::UserWindow;
 
+pub fn get_unix_time() -> usize {
+    let mut timestamp: usize = 0;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 0x9,
+            lateout("rax") timestamp
+        );
+    }
+    timestamp
+}
+
 pub fn get_pid() -> usize {
     let mut pid: usize = 0;
     unsafe {

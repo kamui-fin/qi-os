@@ -16,7 +16,9 @@ use embedded_graphics::{
     text::Text,
     Drawable,
 };
-use userland::{println, syscall_get_backbuffer, syscall_notify_frame_update, syscall_sleep};
+use userland::{
+    get_unix_time, println, syscall_get_backbuffer, syscall_notify_frame_update, syscall_sleep,
+};
 
 global_asm!(
     ".section .text._start",
@@ -52,7 +54,8 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
     syscall_notify_frame_update();
 
     loop {
-        syscall_sleep(5000);
+        get_unix_time();
+        syscall_sleep(2 * 1000);
     }
 
     0

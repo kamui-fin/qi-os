@@ -40,6 +40,7 @@ use kernel::thread::{
     yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
     MAIN_THREAD, SCHEDULER,
 };
+use kernel::time::get_rtc_time;
 use kernel::{
     allocator, hlt_loop, init, memory, mouse, println, serial, serial_print, serial_println,
     BootInfo, RawBootInfo, BOOT_INFO, PROC,
@@ -146,17 +147,17 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
 
     {
         let mut scheduler = SCHEDULER.lock();
-        // scheduler.spawn(2, cleaner_task as *const ());
+        scheduler.spawn(2, cleaner_task as *const ());
         // For now, compositor is just a kernel task
         // scheduler.spawn(3, compositor_task as *const ());
-        scheduler.spawn(4, async_executor_task as *const ());
+        // scheduler.spawn(4, async_executor_task as *const ());
     }
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
 
-    /* let args = [c"test".as_ptr()];
-    spawn_proc(c"xiangqi", args.as_ptr(), 1); */
+    let args = [c"test".as_ptr()];
+    spawn_proc(c"xiangqi", args.as_ptr(), 1);
 
     hlt_loop();
 }
@@ -277,6 +278,13 @@ async fn render_tty_buffer() {
 }
 
 fn compositor_task() {
+    // paint wallpaper (z-index 0)
+    {
+        let boot_info = BOOT_INFO.get().unwrap().lock();
+        let mut screen = boot_info.screen;
+        // screen.clear(Rgb565::new(40, 40, 40)).unwrap();
+    }
+
     loop {
         // Wait for a commit_frame() syscall
         serial_println!("[compositor] Going to zzzz..");

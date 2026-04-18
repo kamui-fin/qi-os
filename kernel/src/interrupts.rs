@@ -26,11 +26,14 @@ use crate::thread::ThreadControlBlock;
 use crate::thread::ThreadState;
 use crate::thread::CURR_THREAD_PTR;
 use crate::thread::SCHEDULER;
+use crate::time::get_rtc_time;
+use crate::time::RTCTime;
 use crate::BOOT_INFO;
 use crate::PROC;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use common::UserWindow;
+use conquer_once::spin::OnceCell;
 use futures_util::stream::select_with_strategy;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
@@ -114,6 +117,7 @@ enum SysCallKind {
     AllocBackBuffer,
     GraphicsFrameReady,
     Sleep,
+    GetUnixTime,
 }
 
 impl From<usize> for SysCallKind {
@@ -128,6 +132,7 @@ impl From<usize> for SysCallKind {
             0x6 => Self::AllocBackBuffer,
             0x7 => Self::GraphicsFrameReady,
             0x8 => Self::Sleep,
+            0x9 => Self::GetUnixTime,
             _ => panic!("unknown syscall"),
         }
     }
@@ -391,6 +396,14 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             curr_proc.heap_end = new_heap_end;
             trap_frame.rax = old_heap_end.as_u64() as usize;
         }
+        SysCallKind::GetUnixTime => {
+            let elapsed_sec = ELAPSED
+                .load(core::sync::atomic::Ordering::Relaxed)
+                .div_ceil(1000) as usize;
+            let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
+            serial_println!("{}", boot_unix + elapsed_sec);
+            trap_frame.rax = boot_unix + elapsed_sec;
+        }
     }
 }
 
@@ -451,11 +464,15 @@ impl InterruptIndex {
     }
 }
 
+static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
 pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
 pub const TIME_SLICE: usize = 100 * 1_000_000;
 pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    if !BOOT_RTC.is_initialized() {
+        BOOT_RTC.init_once(|| get_rtc_time());
+    }
     // 1 ms passed by
     let curr_time = ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     let curr_time_ns = curr_time * 1_000_000;

@@ -1,14 +1,12 @@
 # Roadmap
 
-- Mouse input
 - Time
 - User heap
+    - Stack smash protector
 - Unit + Integraiton testing setup
-- Shell
 - TTY:
     - tty1: read-only log buffer
     - tty2: normal terminal
-- Stack smash protector
 - More concurrency:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
@@ -22,6 +20,7 @@
 - IPC
     - Shared memory 
     - Message passing, streams, or sockets
+- Shell
 - Compositing:
     - Wallpaper
     - Floating windows
