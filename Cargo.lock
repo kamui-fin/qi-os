@@ -332,6 +332,7 @@ dependencies = [
  "common",
  "embedded-graphics",
  "format_no_std",
+ "linked_list_allocator",
 ]
 
 [[package]]

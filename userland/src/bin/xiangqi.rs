@@ -1,13 +1,15 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::{
     arch::global_asm,
     ffi::{c_char, CStr},
     panic::PanicInfo,
     ptr::null,
 };
-
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::Rgb565,
@@ -16,8 +18,9 @@ use embedded_graphics::{
     text::Text,
     Drawable,
 };
+use userland::println;
 use userland::{
-    get_unix_time, println, syscall_get_backbuffer, syscall_notify_frame_update, syscall_sleep,
+    get_unix_time, init_heap, syscall_get_backbuffer, syscall_notify_frame_update, syscall_sleep,
 };
 
 global_asm!(
@@ -36,9 +39,11 @@ global_asm!(
 
 #[no_mangle]
 pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
-    println("Xiangqi INIT");
+    println!("Xiangqi INIT");
 
-    let mut display = syscall_get_backbuffer();
+    init_heap();
+
+    // let mut display = syscall_get_backbuffer();
 
     /* let style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
     Text::new("Hello Rust!", Point::new(20, 30), style)
@@ -51,10 +56,9 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
     .into_styled(PrimitiveStyle::with_fill(Rgb565::BLUE))
     .draw(&mut display); */
 
-    syscall_notify_frame_update();
+    // syscall_notify_frame_update();
 
     loop {
-        get_unix_time();
         syscall_sleep(2 * 1000);
     }
 

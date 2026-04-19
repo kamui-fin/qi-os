@@ -26,25 +26,20 @@ global_asm!(
 
 #[no_mangle]
 pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
-    println("I'm inside the echo process!");
+    println!("I'm inside the echo process!");
 
     let pid = get_pid();
-    let mut buf = [0u8; 64];
-    let s = format_no_std::show(&mut buf, format_args!("My PID: {}", pid)).unwrap();
 
-    let mut buf = [0u8; 64];
-    let s = format_no_std::show(&mut buf, format_args!("I have this many args: {}", argc)).unwrap();
+    println!("[{pid}] I have this many args: {}", argc);
 
     for i in 0..argc {
         unsafe {
             let ptr = *argv.add(i);
             let c_string = CStr::from_ptr(ptr);
             let string = c_string.to_str().unwrap();
-            println(string);
+            println!("{}", string);
         }
     }
-
-    println(s);
 
     return 0;
 }

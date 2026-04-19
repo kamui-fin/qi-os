@@ -1,8 +1,12 @@
 # Roadmap
 
-- Time
-- User heap
-    - Stack smash protector
+- Double buffering
+- Filesystem
+    - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
+    - FAT
+    - NVME device driver
+        - PCIe enumeration
+- Stack smash protector
 - Unit + Integraiton testing setup
 - TTY:
     - tty1: read-only log buffer
@@ -12,11 +16,6 @@
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
-- Filesystem
-    - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
-    - FAT
-    - NVME device driver
-        - PCIe enumeration
 - IPC
     - Shared memory 
     - Message passing, streams, or sockets

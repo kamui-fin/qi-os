@@ -11,7 +11,11 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::{graphics::Screen, memory::BumpAllocator, proc::ProcessControlBlock};
+use crate::{
+    graphics::{BootScreenInfo, Screen},
+    memory::BumpAllocator,
+    proc::ProcessControlBlock,
+};
 
 extern crate alloc;
 
@@ -30,11 +34,11 @@ pub mod thread;
 pub mod time;
 
 pub static BOOT_INFO: OnceCell<Mutex<BootInfo>> = OnceCell::uninit();
+pub static SCREEN: OnceCell<Mutex<Screen>> = OnceCell::uninit();
 pub static PROC: OnceCell<Mutex<Vec<ProcessControlBlock>>> = OnceCell::uninit();
 
 #[derive(Debug)]
 pub struct BootInfo {
-    pub screen: Screen,
     pub allocator: BumpAllocator,
     pub page_table_address: u64,
     pub physical_memory_offset: u64,

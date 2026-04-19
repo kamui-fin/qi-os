@@ -25,7 +25,7 @@ use embedded_graphics::{
 };
 use futures_util::{FutureExt, StreamExt};
 use kernel::allocator::init_heap;
-use kernel::graphics::Screen;
+use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::interrupts::spawn_proc;
 use kernel::lock::NEEDS_RESCHEDULE;
 use kernel::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
@@ -43,7 +43,7 @@ use kernel::thread::{
 use kernel::time::get_rtc_time;
 use kernel::{
     allocator, hlt_loop, init, memory, mouse, println, serial, serial_print, serial_println,
-    BootInfo, RawBootInfo, BOOT_INFO, PROC,
+    BootInfo, RawBootInfo, BOOT_INFO, PROC, SCREEN,
 };
 use spin::Mutex;
 use volatile::Volatile;
@@ -68,7 +68,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     serial_println!("{:#?}", boot_info);
     let phys_offset = boot_info.physical_memory_offset;
     let screen_virt = boot_info.screen_phys_addr + phys_offset;
-    let mut screen = unsafe { (*(screen_virt as *const Screen)).clone() };
+    let mut screen = unsafe { (*(screen_virt as *const BootScreenInfo)).clone() };
 
     let mem_map_virt = boot_info.mem_map_phys_addr + phys_offset;
     let mem_map: &'static mut [MemoryMapEntry] = unsafe {
@@ -87,7 +87,6 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     );
 
     let boot_info = BootInfo {
-        screen,
         allocator,
         page_table_address: boot_info.l4_table_phys_addr,
         physical_memory_offset: phys_offset,
@@ -102,6 +101,9 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
         allocator::init_heap(&mut mapper, &mut boot_info.allocator)
             .expect("heap initialization failed");
+
+        let screen = Screen::new(screen);
+        SCREEN.init_once(|| Mutex::new(screen));
 
         init_console_char_queue();
 
@@ -124,7 +126,6 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         println!("[ OK ] Heap initialized");
 
         serial_println!("Qi OS booted up!\n");
-        serial_println!("boot_info.screen specs: {:?}", boot_info.screen);
 
         kernel::pit::init_pit();
         println!("[ OK ] Timer setup");
@@ -149,8 +150,8 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         let mut scheduler = SCHEDULER.lock();
         scheduler.spawn(2, cleaner_task as *const ());
         // For now, compositor is just a kernel task
-        // scheduler.spawn(3, compositor_task as *const ());
-        // scheduler.spawn(4, async_executor_task as *const ());
+        scheduler.spawn(3, compositor_task as *const ());
+        scheduler.spawn(4, async_executor_task as *const ());
     }
 
     println!("[ OK ] Started threads + async executor");
@@ -164,9 +165,9 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
 
 fn async_executor_task() {
     let mut executor = Executor::new();
-    // executor.spawn(Task::new(print_keypresses()));
+    executor.spawn(Task::new(print_keypresses()));
     // executor.spawn(Task::new(print_mouse_movement()));
-    // executor.spawn(Task::new(render_tty_buffer()));
+    executor.spawn(Task::new(render_tty_buffer()));
     executor.run();
 }
 
@@ -225,8 +226,7 @@ impl ConsoleRenderer {
 
     pub fn paint(&mut self) {
         // holding tihs lock throughout render pass might be bad... isolate out screen lock
-        let boot_info = BOOT_INFO.get().unwrap().lock();
-        let mut screen = boot_info.screen;
+        let mut screen = SCREEN.get().unwrap().lock();
 
         let line_height = 3;
         let font = &FONT_10X20;
@@ -250,10 +250,12 @@ impl ConsoleRenderer {
 
                 // serial_println!("{string} at ({y}, {x})");
                 Text::new(&string, Point::new(x as i32, y as i32), style)
-                    .draw(&mut screen)
+                    .draw(&mut *screen)
                     .unwrap();
             }
         }
+
+        screen.flush();
     }
 }
 
@@ -279,11 +281,11 @@ async fn render_tty_buffer() {
 
 fn compositor_task() {
     // paint wallpaper (z-index 0)
-    {
-        let boot_info = BOOT_INFO.get().unwrap().lock();
-        let mut screen = boot_info.screen;
-        // screen.clear(Rgb565::new(40, 40, 40)).unwrap();
-    }
+    /* {
+        let mut screen = SCREEN.get().unwrap().lock();
+        screen.clear(Rgb565::new(5, 10, 5)).unwrap();
+        screen.flush();
+    } */
 
     loop {
         // Wait for a commit_frame() syscall
@@ -301,9 +303,9 @@ fn compositor_task() {
             serial_println!("{}", curr_proc.backbuffer_frames.is_none());
             if let Some(bb_frames) = &curr_proc.backbuffer_frames {
                 serial_println!("Painting frame!");
-                let mut boot_info = BOOT_INFO.get().unwrap().lock();
-                let lfb_start_ptr = boot_info.screen.buffer_mut().as_mut_ptr();
-                let mut bytes_remaining = boot_info.screen.buffer_mut().len();
+                let boot_info = BOOT_INFO.get().unwrap().lock();
+                let mut screen = SCREEN.get().unwrap().lock();
+                let mut bytes_remaining = screen.buffer_mut().len();
                 for (i, frame) in bb_frames.iter().enumerate() {
                     // copy this physical frame to our LFB
                     let offset = i * 4096;
@@ -311,15 +313,18 @@ fn compositor_task() {
                         frame.start_address().as_u64() + boot_info.physical_memory_offset,
                     )
                     .as_mut_ptr();
+                    let main_back_buffer = screen.back_lfb.as_mut_ptr();
                     let bytes_to_copy = core::cmp::min(4096, bytes_remaining);
                     unsafe {
-                        let dst_ptr = lfb_start_ptr.add(offset);
+                        let dst_ptr = main_back_buffer.add(offset);
                         core::ptr::copy_nonoverlapping(frame_ptr, dst_ptr, 4096);
                     }
                     bytes_remaining -= bytes_to_copy;
                 }
             }
         }
+
+        SCREEN.get().unwrap().lock().flush();
     }
 }
 

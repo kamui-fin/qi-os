@@ -1,3 +1,7 @@
+use core::ptr::copy_nonoverlapping;
+
+use alloc::vec;
+use alloc::vec::Vec;
 use embedded_graphics::{
     pixelcolor::{raw::ToBytes, Rgb565},
     prelude::{OriginDimensions, Point, RgbColor, Size},
@@ -8,7 +12,7 @@ use crate::serial_println;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct Screen {
+pub struct BootScreenInfo {
     pub width: u32,
     pub height: u32,
     pub bpp: u32,
@@ -23,21 +27,55 @@ pub struct Screen {
     pub y_max: u32,
 }
 
+#[derive(Debug)]
+pub struct Screen {
+    pub bytes_per_line: u32,
+    pub bytes_per_pixel: u32,
+    pub width: u32,
+    pub height: u32,
+    pub vesa_lfb: u32,
+    pub back_lfb: Vec<u8>,
+}
+
 impl Screen {
+    pub fn new(screen_info: BootScreenInfo) -> Self {
+        Self {
+            vesa_lfb: screen_info.framebuffer,
+            width: screen_info.width,
+            height: screen_info.height,
+            bytes_per_line: screen_info.bytes_per_line,
+            bytes_per_pixel: screen_info.bytes_per_pixel,
+            back_lfb: vec![0; (screen_info.bytes_per_line * screen_info.height) as usize],
+        }
+    }
+
+    pub fn flush(&mut self) {
+        unsafe {
+            copy_nonoverlapping(
+                self.back_lfb.as_ptr(),
+                self.buffer_mut().as_mut_ptr(),
+                self.back_lfb.len(),
+            );
+        }
+    }
+
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         unsafe {
             core::slice::from_raw_parts_mut(
-                (self.framebuffer) as *mut u8,
+                (self.vesa_lfb as usize) as *mut u8,
                 (self.bytes_per_line * self.height) as usize,
             )
         }
     }
 
     pub fn set_pixel_in(&mut self, position: Point, color: Rgb565) {
-        if position.x < 0 || position.x >= self.width as i32 ||
-            position.y < 0 || position.y >= self.height as i32 {
-             return;
-         }
+        if position.x < 0
+            || position.x >= self.width as i32
+            || position.y < 0
+            || position.y >= self.height as i32
+        {
+            return;
+        }
 
         // calculate offset to first byte of pixel
         let byte_offset = {
@@ -47,7 +85,7 @@ impl Screen {
             line_offset + (position.x as u32 * self.bytes_per_pixel)
         } as usize;
 
-        let pixel_buffer = &mut self.buffer_mut()[byte_offset..];
+        let pixel_buffer = &mut self.back_lfb[byte_offset..];
         let bytes = color.to_le_bytes();
         pixel_buffer[0] = bytes[0];
         pixel_buffer[1] = bytes[1];
@@ -69,6 +107,16 @@ impl embedded_graphics::draw_target::DrawTarget for Screen {
         }
         Ok(())
     }
+
+    /* fn fill_contiguous<I>(&mut self, area: &Rectangle, colors: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Self::Color>,
+    {
+    }
+
+    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {}
+
+    fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {} */
 }
 
 impl OriginDimensions for Screen {

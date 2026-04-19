@@ -30,6 +30,7 @@ use crate::time::get_rtc_time;
 use crate::time::RTCTime;
 use crate::BOOT_INFO;
 use crate::PROC;
+use crate::SCREEN;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use common::UserWindow;
@@ -211,7 +212,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
     let arg4 = trap_frame.r10;
     let arg5 = trap_frame.r8;
     let arg6 = trap_frame.r9;
-    serial_println!("{:#?} {arg1:x} {arg2:x}", kind);
+    // serial_println!("{:#?} {arg1:x} {arg2:x}", kind);
     match kind {
         SysCallKind::Write => {
             // arg1: *const str
@@ -220,7 +221,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             let str_ptr: *const str = slice_ptr as *const str;
             let str = unsafe { &*str_ptr };
 
-            serial_println!("{str}");
+            serial_print!("{str}");
         }
         SysCallKind::Exit => {
             // arg1: status
@@ -271,6 +272,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 .unwrap();
 
             let mut boot_info = BOOT_INFO.get().unwrap().lock();
+            let screen = SCREEN.get().unwrap().lock();
             // not seeing any prints after here???
             let mut mapper = unsafe {
                 OffsetPageTable::new(
@@ -278,7 +280,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                     VirtAddr::new(boot_info.physical_memory_offset),
                 )
             };
-            let buffer_num_bytes = boot_info.screen.bytes_per_line * boot_info.screen.height;
+            let buffer_num_bytes = screen.bytes_per_line * screen.height;
 
             let num_frames = buffer_num_bytes.div_ceil(4096);
             // that's how many pages we'll have
@@ -322,10 +324,10 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // Fill in user passed in FrameBufferInfo struct
             let user_window_info = unsafe { &mut *(arg1 as *mut UserWindow) };
             user_window_info.base_addr = MMAP_BASE as u64;
-            user_window_info.width = boot_info.screen.width;
-            user_window_info.height = boot_info.screen.height;
-            user_window_info.bytes_per_pixel = boot_info.screen.bytes_per_pixel;
-            user_window_info.bytes_per_line = boot_info.screen.bytes_per_line;
+            user_window_info.width = screen.width;
+            user_window_info.height = screen.height;
+            user_window_info.bytes_per_pixel = screen.bytes_per_pixel;
+            user_window_info.bytes_per_line = screen.bytes_per_line;
         }
         SysCallKind::GraphicsFrameReady => {
             // we notify compositor that we are ready for a paint

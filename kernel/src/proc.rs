@@ -83,7 +83,6 @@ impl<'a> ProcessControlBlock<'a> {
         argc: usize,
         program: &'static CStr,
     ) -> Self {
-        serial_println!("Creating process!");
         // Paging, start with kernel mapped
         let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
 
@@ -211,7 +210,7 @@ impl<'a> ProcessControlBlock<'a> {
 
         let file = ElfBytes::<LittleEndian>::minimal_parse(program_code).unwrap();
         let program_start = VirtAddr::new(file.ehdr.e_entry);
-        let mut program_end = program_start;
+        let mut program_end = program_start.as_u64();
         let segs = file.segments().unwrap();
         for seg in segs {
             if seg.p_type == PT_LOAD {
@@ -225,12 +224,13 @@ impl<'a> ProcessControlBlock<'a> {
                 let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(seg.p_vaddr));
                 let num_pages = (seg.p_memsz + start_offset).div_ceil(PAGE_SIZE) as usize;
 
-                program_end += seg.p_memsz;
+                program_end = core::cmp::max(program_end, (seg.p_vaddr + seg.p_memsz));
 
                 let code = file.segment_data(&seg).unwrap();
                 for (i, page) in
                     Page::range(start_page, start_page + (num_pages as u64)).enumerate()
                 {
+                    serial_println!("Mapping {:x}", page.start_address().as_u64());
                     if let Ok(frame) = mapper.translate_page(page) {
                         let frame_ptr: *mut u8 = VirtAddr::new(
                             frame.start_address().as_u64() + boot_info.physical_memory_offset,
@@ -323,9 +323,14 @@ impl<'a> ProcessControlBlock<'a> {
             }
         }
 
-        let heap_start = (program_end + 1usize).align_up(4096u64);
+        let heap_start = VirtAddr::new(program_end + 1u64).align_up(4096u64);
 
-        serial_println!("Jumping to {:x}", program_start.as_u64());
+        serial_println!(
+            "Jumping to {:x} --- {:x} . Heap is at {:x}",
+            program_start.as_u64(),
+            program_end,
+            heap_start.as_u64()
+        );
 
         let pid = PID.fetch_add(1u64, core::sync::atomic::Ordering::Relaxed);
         let tcb = ThreadControlBlock::new(
