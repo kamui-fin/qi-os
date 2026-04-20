@@ -1,4 +1,6 @@
-struct BPB {
+#[derive(Debug)]
+#[repr(packed, C)]
+pub struct BPB {
     jmp_bytes: [u8; 3],
     oem_identifier: [u8; 8],
 
@@ -22,14 +24,14 @@ struct BPB {
 
     // FAT32 Extended BPB
     // Sectors per FAT. The size of the FAT in sectors.
-    fat_size_32: u32,
+    pub fat_size_32: u32,
     ext_flags: u16,
     // FAT version number. The high byte is the major version and the low byte is the minor version. FAT drivers should respect this field.
     fs_ver: u16,
     // The cluster number of the root directory. Often this field is set to 2.
-    root_cluster: u32,
+    pub root_cluster: u32,
     // The sector number of the FSInfo structure.
-    fs_info: u16,
+    pub fs_info: u16,
     // The sector number of the backup boot sector.
     backup_boot_sector: u16,
     reserved: [u8; 12],
@@ -52,7 +54,9 @@ struct BPB {
     boot_sector_signature: u16, // 0xAA55
 }
 
-struct FSInfo {
+#[repr(C, packed)]
+#[derive(Debug)]
+pub struct FSInfo {
     lead_signature: u32, // 0x41615252
     reserved_1: [u8; 480],
     struct_signature: u32, // 0x61417272

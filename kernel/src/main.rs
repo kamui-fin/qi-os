@@ -24,26 +24,28 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
-use kernel::allocator::init_heap;
+use kernel::driver::ata::AtaDriver;
+use kernel::driver::cmos::get_rtc_time;
+use kernel::fs::fat::{BPB, FSInfo};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::interrupts::spawn_proc;
-use kernel::lock::NEEDS_RESCHEDULE;
-use kernel::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
-use kernel::proc::{ProcessControlBlock, ECHO_ELF};
+use kernel::mem::allocator::init_heap;
+use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
+use kernel::task::lock::NEEDS_RESCHEDULE;
 use kernel::task::mouse::print_mouse_movement;
-use kernel::task::tty::{init_console_char_queue, Color, ColorCode, ConsoleStream, ScreenChar};
-use kernel::task::Task;
-use kernel::thread::{
+use kernel::task::proc::{ProcessControlBlock, ECHO_ELF};
+use kernel::task::thread::{
     block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
     yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
     MAIN_THREAD, SCHEDULER,
 };
-use kernel::time::get_rtc_time;
+use kernel::task::tty::{init_console_char_queue, Color, ColorCode, ConsoleStream, ScreenChar};
+use kernel::task::Task;
 use kernel::{
-    allocator, hlt_loop, init, memory, mouse, println, serial, serial_print, serial_println,
-    BootInfo, RawBootInfo, BOOT_INFO, PROC, SCREEN,
+    driver::mouse, driver::serial, hlt_loop, init, mem::allocator, mem::memory, println,
+    serial_print, serial_println, BootInfo, RawBootInfo, BOOT_INFO, PROC, SCREEN,
 };
 use spin::Mutex;
 use volatile::Volatile;
@@ -127,14 +129,14 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
 
         serial_println!("Qi OS booted up!\n");
 
-        kernel::pit::init_pit();
+        kernel::driver::pit::init_pit();
         println!("[ OK ] Timer setup");
 
-        unsafe {
+        /* unsafe {
             mouse::init_ps2();
             mouse::init_ps2_mouse();
         }
-        println!("[ OK ] PS/2 Mouse initialized");
+        println!("[ OK ] PS/2 Mouse initialized"); */
 
         unsafe {
             MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
@@ -148,17 +150,36 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
 
     {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn(2, cleaner_task as *const ());
+        // scheduler.spawn(2, cleaner_task as *const ());
         // For now, compositor is just a kernel task
-        scheduler.spawn(3, compositor_task as *const ());
-        scheduler.spawn(4, async_executor_task as *const ());
+        /* scheduler.spawn(3, compositor_task as *const ());
+        scheduler.spawn(4, async_executor_task as *const ()); */
     }
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
 
-    let args = [c"test".as_ptr()];
-    spawn_proc(c"xiangqi", args.as_ptr(), 1);
+    /* let args = [c"test".as_ptr()];
+    spawn_proc(c"xiangqi", args.as_ptr(), 1); */
+
+    // DRIVE + FILESYSTEM TESTING
+    let driver = AtaDriver::new(
+        kernel::driver::ata::BusType::Primary,
+        kernel::driver::ata::DriveType::Slave,
+    );
+    let info = driver.availability();
+
+    const SECTOR: usize = 256;
+
+    let mut bpb = vec![0u16; SECTOR];
+    driver.read(0, 1, &mut bpb);
+    let bpb = unsafe { &*(bpb.as_ptr() as *const BPB) };
+
+    let mut fs_info = vec![0u16; SECTOR];
+    driver.read(bpb.fs_info as u64, 1, &mut fs_info);
+    let fs_info = unsafe { &*(fs_info.as_ptr() as *const FSInfo) };
+
+    serial_println!("{:#?}", fs_info);
 
     hlt_loop();
 }
@@ -333,7 +354,7 @@ fn cleaner_task() {
         let removed_task = {
             let mut scheduler = SCHEDULER.lock();
             let task_index = scheduler.threads.iter().position(|t| {
-                if let ThreadState::Blocked(kernel::thread::BlockReason::Terminated(_)) =
+                if let ThreadState::Blocked(kernel::task::thread::BlockReason::Terminated(_)) =
                     t.lock().state
                 {
                     true

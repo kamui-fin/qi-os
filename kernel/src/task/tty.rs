@@ -1,3 +1,4 @@
+use crate::driver::serial;
 use conquer_once::spin::OnceCell;
 use core::fmt::{self, Write};
 use core::{

@@ -95,15 +95,15 @@ const PRIMARY_CONTROL_REGISTER: u16 = 0x3F6;
 const SECONDARY_BASE_REGISTER: u16 = 0x170;
 const SECONDARY_CONTROL_REGISTER: u16 = 0x376;
 
-#[derive(Clone, Copy)]
-enum BusType {
+#[derive(Debug, Clone, Copy)]
+pub enum BusType {
     Primary,
     Secondary,
 }
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    struct AtaError: u8 {
+    pub struct AtaError: u8 {
         const BadBlock = 1 << 7;
         const UncorrectableDataError = 1 << 6;
         const MediaChanged = 1 << 5;
@@ -160,7 +160,7 @@ impl AtaRegister for ControlRegister {
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    struct Status: u8 {
+    pub struct Status: u8 {
         const Busy = 1 << 7;
         const Ready = 1 << 6;
         const DriveFaultError = 1 << 5;
@@ -172,11 +172,12 @@ bitflags! {
     }
 }
 
-struct IdentifyDiskInfo {
-    is_hard_disk: bool,
-    supports_lba48: bool,
-    num_28_bit_sectors: u32,
-    num_48_bit_sectors: u64,
+#[derive(Debug)]
+pub struct IdentifyDiskInfo {
+    pub is_hard_disk: bool,
+    pub supports_lba48: bool,
+    pub num_28_bit_sectors: u32,
+    pub num_48_bit_sectors: u64,
 }
 
 fn parse_disk_info(buffer: [u16; 256]) -> IdentifyDiskInfo {
@@ -191,12 +192,27 @@ fn parse_disk_info(buffer: [u16; 256]) -> IdentifyDiskInfo {
     }
 }
 
-struct AtaDriver {
+#[derive(Debug)]
+pub struct AtaDriver {
     bus_type: BusType,
     drive: u8,
 }
 
+#[repr(u8)]
+#[derive(Debug)]
+pub enum DriveType {
+    Master = 0xA0,
+    Slave = 0xB0,
+}
+
 impl AtaDriver {
+    pub fn new(bus_type: BusType, drive: DriveType) -> Self {
+        Self {
+            bus_type,
+            drive: drive as u8,
+        }
+    }
+
     fn read_data_reg(&self) -> u16 {
         let mut port = Port::new(DataRegister::Data.absolute(self.bus_type));
         unsafe { port.read() }
@@ -233,7 +249,13 @@ impl AtaDriver {
         }
     }
 
-    pub fn read(&self, lba: u64, sectors: u8, buffer: &[u16]) -> Result<(), AtaError> {
+    pub fn read(&self, lba: u64, sectors: u8, buffer: &mut [u16]) -> Result<usize, AtaError> {
+        let actual_sectors: usize = if sectors == 0 { 256 } else { sectors as usize };
+        let (sector_capacity, leftover) = (buffer.len().div_ceil(256), buffer.len() % 256);
+        if leftover > 0 || sector_capacity != actual_sectors {
+            return Ok(0);
+        }
+
         while self.get_status().contains(Status::Busy) {}
 
         let lba_bytes = lba.to_le_bytes();
@@ -250,9 +272,7 @@ impl AtaDriver {
 
         self.io_wait();
 
-        let mut data = Vec::new();
-        let actual_sectors: usize = if sectors == 0 { 256 } else { sectors as usize };
-        for _ in 0..(actual_sectors) {
+        for i in 0..(actual_sectors) {
             // poll loop
             loop {
                 let status = self.get_status();
@@ -265,17 +285,23 @@ impl AtaDriver {
             }
 
             let mut sector_buffer = [0u16; 256];
-            for i in 0..256 {
-                sector_buffer[i] = self.read_data_reg();
+            for j in 0..256 {
+                sector_buffer[j] = self.read_data_reg();
             }
-            data.push(sector_buffer)
+
+            buffer[(i * 256)..((i + 1) * 256)].copy_from_slice(&sector_buffer);
         }
 
-        Ok(())
+        Ok(actual_sectors * 512)
     }
 
     pub fn write(&self, lba: u64, data: &[u16]) -> Result<(), AtaError> {
-        let num_sectors: u8 = data.len().try_into().unwrap_or(0);
+        let (actual_sectors, leftover) = (data.len().div_ceil(256), data.len() % 256);
+        if leftover > 0 || actual_sectors > 256 {
+            return Ok(());
+        }
+
+        let num_sectors: u8 = actual_sectors.try_into().unwrap_or(0);
 
         while self.get_status().contains(Status::Busy) {}
 
@@ -293,7 +319,7 @@ impl AtaDriver {
 
         self.io_wait();
 
-        for sector in data {
+        for i in 0..actual_sectors {
             // poll loop
             loop {
                 let status = self.get_status();
@@ -304,8 +330,8 @@ impl AtaDriver {
                     return Err(self.get_ata_error());
                 }
             }
-            for word in sector {
-                self.write_data_reg(word);
+            for word in &data[(i * 256)..(i + 1) * 256] {
+                self.write_data_reg(*word);
             }
         }
 
@@ -318,7 +344,10 @@ impl AtaDriver {
         Ok(())
     }
 
-    fn availability(&self) -> Result<Option<IdentifyDiskInfo>, AtaError> {
+    pub fn availability(&self) -> Result<Option<IdentifyDiskInfo>, AtaError> {
+        // Disable hardware interrupts from the drive.
+        self.write_u8_reg(ControlRegister::AlternateStatus, 0x02);
+
         if self.read_u8_reg(DataRegister::Command) == 0xFF {
             return Ok(None);
         }

@@ -8,26 +8,26 @@ use core::ptr;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 
+use crate::driver::cmos::get_rtc_time;
+use crate::driver::cmos::RTCTime;
+use crate::driver::mouse::GenericPs2Packet;
 use crate::hlt_loop;
-use crate::lock::NEEDS_RESCHEDULE;
-use crate::mouse::GenericPs2Packet;
 use crate::print;
 use crate::println;
-use crate::proc::ProcessControlBlock;
-use crate::proc::ECHO_ELF;
-use crate::proc::XIANGQI_ELF;
 use crate::serial_print;
 use crate::serial_println;
-use crate::thread::nano_sleep;
-use crate::thread::switch_if_needed;
-use crate::thread::terminate_task;
-use crate::thread::BlockReason;
-use crate::thread::ThreadControlBlock;
-use crate::thread::ThreadState;
-use crate::thread::CURR_THREAD_PTR;
-use crate::thread::SCHEDULER;
-use crate::time::get_rtc_time;
-use crate::time::RTCTime;
+use crate::task::lock::NEEDS_RESCHEDULE;
+use crate::task::proc::ProcessControlBlock;
+use crate::task::proc::ECHO_ELF;
+use crate::task::proc::XIANGQI_ELF;
+use crate::task::thread::nano_sleep;
+use crate::task::thread::switch_if_needed;
+use crate::task::thread::terminate_task;
+use crate::task::thread::BlockReason;
+use crate::task::thread::ThreadControlBlock;
+use crate::task::thread::ThreadState;
+use crate::task::thread::CURR_THREAD_PTR;
+use crate::task::thread::SCHEDULER;
 use crate::BOOT_INFO;
 use crate::PROC;
 use crate::SCREEN;
@@ -64,7 +64,7 @@ lazy_static! {
         unsafe {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
-                .set_stack_index(crate::gdt::DOUBLE_FAULT_IST_INDEX);
+                .set_stack_index(crate::mem::gdt::DOUBLE_FAULT_IST_INDEX);
         }
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);

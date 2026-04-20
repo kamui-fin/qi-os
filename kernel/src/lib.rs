@@ -11,7 +11,11 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::graphics::{BootScreenInfo, Screen};
+use crate::{
+    graphics::{BootScreenInfo, Screen},
+    mem::memory::BumpAllocator,
+    task::proc::ProcessControlBlock,
+};
 
 extern crate alloc;
 
@@ -51,10 +55,10 @@ pub struct RawBootInfo {
 }
 
 pub fn init() {
-    serial::init();
-    gdt::init();
-    interrupts::init_idt();
-    unsafe { interrupts::PICS.lock().initialize() };
+    crate::driver::serial::init();
+    crate::mem::gdt::init();
+    crate::interrupts::init_idt();
+    unsafe { crate::interrupts::PICS.lock().initialize() };
 }
 
 pub fn hlt_loop() -> ! {

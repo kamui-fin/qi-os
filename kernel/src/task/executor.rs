@@ -67,7 +67,7 @@ impl Executor {
     fn sleep_if_idle(&self) {
         interrupts::disable();
         if self.task_queue.is_empty() {
-            block_task(crate::thread::BlockReason::Paused);
+            block_task(crate::task::thread::BlockReason::Paused);
         } else {
             interrupts::enable();
         }

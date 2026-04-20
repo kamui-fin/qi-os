@@ -3,8 +3,6 @@ use x86_64::structures::paging::OffsetPageTable;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PhysFrame, Size4KiB};
 use x86_64::{structures::paging::PageTable, PhysAddr, VirtAddr};
 
-use crate::{serial, serial_println};
-
 /// Initialize a new OffsetPageTable.
 ///
 /// This function is unsafe because the caller must guarantee that the
