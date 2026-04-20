@@ -1,6 +1,5 @@
 # Roadmap
 
-- Double buffering
 - Filesystem
     - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
     - FAT

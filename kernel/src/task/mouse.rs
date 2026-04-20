@@ -1,4 +1,4 @@
-use crate::{mouse::GenericPs2Packet, println, serial_println, BOOT_INFO, SCREEN};
+use crate::{driver::mouse::GenericPs2Packet, println, serial_println, BOOT_INFO, SCREEN};
 use conquer_once::spin::OnceCell;
 use core::{
     pin::Pin,

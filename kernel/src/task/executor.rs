@@ -1,4 +1,4 @@
-use crate::thread::{block_task, SCHEDULER};
+use crate::task::thread::{block_task, SCHEDULER};
 
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc};

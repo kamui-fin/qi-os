@@ -24,7 +24,7 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::{memory::BumpAllocator, thread::ThreadControlBlock};
+use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
 use crate::{serial_println, BOOT_INFO};
 
 pub static ECHO_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_echo"));

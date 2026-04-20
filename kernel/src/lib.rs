@@ -11,27 +11,16 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::{
-    graphics::{BootScreenInfo, Screen},
-    memory::BumpAllocator,
-    proc::ProcessControlBlock,
-};
+use crate::graphics::{BootScreenInfo, Screen};
 
 extern crate alloc;
 
-pub mod allocator;
-pub mod gdt;
+pub mod driver;
+pub mod fs;
 pub mod graphics;
 pub mod interrupts;
-pub mod lock;
-pub mod memory;
-pub mod mouse;
-pub mod pit;
-pub mod proc;
-pub mod serial;
+pub mod mem;
 pub mod task;
-pub mod thread;
-pub mod time;
 
 pub static BOOT_INFO: OnceCell<Mutex<BootInfo>> = OnceCell::uninit();
 pub static SCREEN: OnceCell<Mutex<Screen>> = OnceCell::uninit();

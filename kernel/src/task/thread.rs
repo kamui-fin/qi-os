@@ -10,9 +10,9 @@ use spin::Mutex;
 
 use crate::{
     interrupts::{ELAPSED, TIME_SLICE},
-    lock::{SimpleIrqLock, IRQ_DISABLE_COUNTER, NEEDS_RESCHEDULE},
     serial_println,
 };
+use crate::task::lock::{SimpleIrqLock, IRQ_DISABLE_COUNTER, NEEDS_RESCHEDULE};
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, vec::Vec};
 use lazy_static::lazy_static;
 use x86_64::{
