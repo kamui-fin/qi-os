@@ -466,7 +466,7 @@ impl InterruptIndex {
     }
 }
 
-static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
+pub static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
 pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
 pub const TIME_SLICE: usize = 100 * 1_000_000;
 pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;

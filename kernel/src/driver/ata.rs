@@ -1,84 +1,5 @@
 /*
-* KEEP TRACK OF BAD SECTORS
-* These ports behave like registers:
-* | Port  | Name             | Purpose              |
-* | ----- | ---------------- | -------------------- |
-* | 0x1F0 | Data             | 16-bit data transfer |
-* | 0x1F1 | Error / Features |                      |
-* | 0x1F2 | Sector Count     |                      |
-* | 0x1F3 | LBA low          |                      |
-* | 0x1F4 | LBA mid          |                      |
-* | 0x1F5 | LBA high         |                      |
-* | 0x1F6 | Drive/Head       |                      |
-* | 0x1F7 | Status / Command |                      |
-LBA = sector index
-
-Split 28 bit LBA across:
-LBA bits:
-[27:24] → drive/head register (0x1F6)
-[23:16] → 0x1F5
-[15:8]  → 0x1F4
-[7:0]   → 0x1F3
-
-# READ Sector
---------
-1. Wait until not busy
-while (BSY == 1) → wait
-
-2. Select drive + high LBA bits
-
-Write to 0x1F6:
-
-0xE0 | (drive << 4) | (LBA >> 24)
-0xE0 = LBA mode + master
-0xF0 = LBA mode + slave
-
-3. Set sector Count
-
-0x1F2 = number of sectors (usually 1)
-
-4. Set LBA low/mid/high
-
-5. Send & wait for data & read
-
-0x1F7 = 0x20   (READ SECTORS)
-Poll until: BSY = 0 DRQ = 1
-Read 256 words (16-bit) from port 0x1F0. That equals 512 bytes
-
-7. Writing a sector
-Same idea, but:
-- Command = 0x30
-- After DRQ = 1 → you WRITE 256 words to 0x1F0
-- Then wait for completion
-
-
-GOTCHA:
-❗ DRQ must be set before data transfer
-❗ ERR bit checks
-❗ 400ns delay After selecting drive: read status port 4 times
-
-You must read/write 16-bit values, not bytes.
-Data comes as little-endian words.
-3. Strings are weird
-Model string is: byte-swapped per word & you must fix it
-
-# DISK ENMERATIONS
-----------------
-1. SELECT DRIVE Write to 0x1F6 (master/slave)
-2. Write 0 to: 0x1F2, 0x1F3, 0x1F4, 0x1F5
-3. IDENTIFY CMD 0x1F7 = 0xEC
-
-If LBA mid/high are non-zero after IDENTIFY → it's not ATA (might be ATAPI)
-
-Step 4: Check status
-If status = 0 → no device
-Otherwise wait for:
-BSY = 0
-DRQ = 1
-
-Step 5: Read IDENTIFY data
-256 words from 0x1F0
-This gives: model name, capabilities, total sectors
+* TODO: keep track of bad sectors
 */
 
 use core::error::Error;
@@ -87,7 +8,7 @@ use alloc::vec::{self, Vec};
 use bitflags::bitflags;
 use x86_64::instructions::port::Port;
 
-use crate::driver::cmos::get_rtc_time;
+use crate::{driver::cmos::get_rtc_time, fs::fat::RawDisk};
 
 const PRIMARY_BASE_REGISTER: u16 = 0x1F0;
 const PRIMARY_CONTROL_REGISTER: u16 = 0x3F6;
@@ -249,101 +170,6 @@ impl AtaDriver {
         }
     }
 
-    pub fn read(&self, lba: u64, sectors: u8, buffer: &mut [u16]) -> Result<usize, AtaError> {
-        let actual_sectors: usize = if sectors == 0 { 256 } else { sectors as usize };
-        let (sector_capacity, leftover) = (buffer.len().div_ceil(256), buffer.len() % 256);
-        if leftover > 0 || sector_capacity != actual_sectors {
-            return Ok(0);
-        }
-
-        while self.get_status().contains(Status::Busy) {}
-
-        let lba_bytes = lba.to_le_bytes();
-
-        self.write_u8_reg(DataRegister::SectorCount, sectors);
-        self.write_u8_reg(DataRegister::LbaLow, lba_bytes[0]);
-        self.write_u8_reg(DataRegister::LbaMid, lba_bytes[1]);
-        self.write_u8_reg(DataRegister::LbaHigh, lba_bytes[2]);
-        self.write_u8_reg(
-            DataRegister::Drive,
-            (lba_bytes[3] & 0b1111) | self.drive | 0x40,
-        );
-        self.write_u8_reg(DataRegister::Command, 0x20);
-
-        self.io_wait();
-
-        for i in 0..(actual_sectors) {
-            // poll loop
-            loop {
-                let status = self.get_status();
-                if !status.contains(Status::Busy) && status.contains(Status::DataRequestReady) {
-                    break;
-                }
-                if status.contains(Status::Error) {
-                    return Err(self.get_ata_error());
-                }
-            }
-
-            let mut sector_buffer = [0u16; 256];
-            for j in 0..256 {
-                sector_buffer[j] = self.read_data_reg();
-            }
-
-            buffer[(i * 256)..((i + 1) * 256)].copy_from_slice(&sector_buffer);
-        }
-
-        Ok(actual_sectors * 512)
-    }
-
-    pub fn write(&self, lba: u64, data: &[u16]) -> Result<(), AtaError> {
-        let (actual_sectors, leftover) = (data.len().div_ceil(256), data.len() % 256);
-        if leftover > 0 || actual_sectors > 256 {
-            return Ok(());
-        }
-
-        let num_sectors: u8 = actual_sectors.try_into().unwrap_or(0);
-
-        while self.get_status().contains(Status::Busy) {}
-
-        let lba_bytes = lba.to_le_bytes();
-
-        self.write_u8_reg(DataRegister::SectorCount, num_sectors);
-        self.write_u8_reg(DataRegister::LbaLow, lba_bytes[0]);
-        self.write_u8_reg(DataRegister::LbaMid, lba_bytes[1]);
-        self.write_u8_reg(DataRegister::LbaHigh, lba_bytes[2]);
-        self.write_u8_reg(
-            DataRegister::Drive,
-            (lba_bytes[3] & 0b1111) | self.drive | 0x40,
-        );
-        self.write_u8_reg(DataRegister::Command, 0x30);
-
-        self.io_wait();
-
-        for i in 0..actual_sectors {
-            // poll loop
-            loop {
-                let status = self.get_status();
-                if !status.contains(Status::Busy) && status.contains(Status::DataRequestReady) {
-                    break;
-                }
-                if status.contains(Status::Error) {
-                    return Err(self.get_ata_error());
-                }
-            }
-            for word in &data[(i * 256)..(i + 1) * 256] {
-                self.write_data_reg(*word);
-            }
-        }
-
-        // flush cache
-        self.write_u8_reg(DataRegister::Command, 0xE7);
-        self.io_wait();
-
-        while self.get_status().contains(Status::Busy) {}
-
-        Ok(())
-    }
-
     pub fn availability(&self) -> Result<Option<IdentifyDiskInfo>, AtaError> {
         // Disable hardware interrupts from the drive.
         self.write_u8_reg(ControlRegister::AlternateStatus, 0x02);
@@ -394,5 +220,107 @@ impl AtaDriver {
         }
 
         return Ok(Some(parse_disk_info(buffer)));
+    }
+}
+
+impl RawDisk for AtaDriver {
+    fn read(&self, lba: u64, sectors: u8, buffer: &mut [u8]) -> Result<usize, AtaError> {
+        let actual_sectors: usize = if sectors == 0 { 256 } else { sectors as usize };
+        let (sector_capacity, leftover) = (buffer.len().div_ceil(512), buffer.len() % 512);
+        if leftover > 0 || sector_capacity != actual_sectors {
+            return Ok(0);
+        }
+
+        while self.get_status().contains(Status::Busy) {}
+
+        let lba_bytes = lba.to_le_bytes();
+
+        self.write_u8_reg(DataRegister::SectorCount, sectors);
+        self.write_u8_reg(DataRegister::LbaLow, lba_bytes[0]);
+        self.write_u8_reg(DataRegister::LbaMid, lba_bytes[1]);
+        self.write_u8_reg(DataRegister::LbaHigh, lba_bytes[2]);
+        self.write_u8_reg(
+            DataRegister::Drive,
+            (lba_bytes[3] & 0b1111) | self.drive | 0x40,
+        );
+        self.write_u8_reg(DataRegister::Command, 0x20);
+
+        self.io_wait();
+
+        for i in 0..(actual_sectors) {
+            // poll loop
+            loop {
+                let status = self.get_status();
+                if !status.contains(Status::Busy) && status.contains(Status::DataRequestReady) {
+                    break;
+                }
+                if status.contains(Status::Error) {
+                    return Err(self.get_ata_error());
+                }
+            }
+
+            let start = i * 512;
+            for j in 0..256 {
+                let data = self.read_data_reg();
+                let bytes = data.to_le_bytes();
+
+                buffer[start + (j * 2)] = bytes[0];
+                buffer[start + (j * 2 + 1)] = bytes[1];
+            }
+        }
+
+        Ok(actual_sectors * 512)
+    }
+
+    fn write(&self, lba: u64, data: &[u8]) -> Result<(), AtaError> {
+        let (actual_sectors, leftover) = (data.len().div_ceil(512), data.len() % 512);
+        if leftover > 0 || actual_sectors > 256 {
+            return Ok(());
+        }
+
+        let num_sectors: u8 = actual_sectors.try_into().unwrap_or(0);
+
+        while self.get_status().contains(Status::Busy) {}
+
+        let lba_bytes = lba.to_le_bytes();
+
+        self.write_u8_reg(DataRegister::SectorCount, num_sectors);
+        self.write_u8_reg(DataRegister::LbaLow, lba_bytes[0]);
+        self.write_u8_reg(DataRegister::LbaMid, lba_bytes[1]);
+        self.write_u8_reg(DataRegister::LbaHigh, lba_bytes[2]);
+        self.write_u8_reg(
+            DataRegister::Drive,
+            (lba_bytes[3] & 0b1111) | self.drive | 0x40,
+        );
+        self.write_u8_reg(DataRegister::Command, 0x30);
+
+        self.io_wait();
+
+        for i in 0..actual_sectors {
+            // poll loop
+            loop {
+                let status = self.get_status();
+                if !status.contains(Status::Busy) && status.contains(Status::DataRequestReady) {
+                    break;
+                }
+                if status.contains(Status::Error) {
+                    return Err(self.get_ata_error());
+                }
+            }
+            for chunk in data[(i * 512)..(i + 1) * 512].chunks(2) {
+                if chunk.len() == 2 {
+                    let word = (chunk[1] as u16) << 8 | chunk[0] as u16;
+                    self.write_data_reg(word);
+                }
+            }
+        }
+
+        // flush cache
+        self.write_u8_reg(DataRegister::Command, 0xE7);
+        self.io_wait();
+
+        while self.get_status().contains(Status::Busy) {}
+
+        Ok(())
     }
 }

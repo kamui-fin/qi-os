@@ -26,7 +26,8 @@ use embedded_graphics::{
 use futures_util::{FutureExt, StreamExt};
 use kernel::driver::ata::AtaDriver;
 use kernel::driver::cmos::get_rtc_time;
-use kernel::fs::fat::{BPB, FSInfo};
+use kernel::fs::fat::{FSInfo, Fat32, RawDisk, BPB};
+use kernel::fs::ustar::{octascii_to_dec, USTAR};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::interrupts::spawn_proc;
 use kernel::mem::allocator::init_heap;
@@ -168,18 +169,43 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         kernel::driver::ata::DriveType::Slave,
     );
     let info = driver.availability();
-
-    const SECTOR: usize = 256;
-
-    let mut bpb = vec![0u16; SECTOR];
+    const SECTOR: usize = 512;
+    let mut bpb = vec![0u8; SECTOR];
     driver.read(0, 1, &mut bpb);
     let bpb = unsafe { &*(bpb.as_ptr() as *const BPB) };
-
-    let mut fs_info = vec![0u16; SECTOR];
+    let mut fs_info = vec![0u8; SECTOR];
     driver.read(bpb.fs_info as u64, 1, &mut fs_info);
     let fs_info = unsafe { &*(fs_info.as_ptr() as *const FSInfo) };
+    let fat_driver = Fat32::new(bpb, fs_info, driver);
 
-    serial_println!("{:#?}", fs_info);
+    /* let path = "/DIR/onesec.txt";
+    fat_driver.create_file(path);
+    let mut found_file = fat_driver.find_file(path).unwrap();
+    serial_println!("{:#?}", found_file);
+
+    fat_driver.append(&mut found_file, b"Hello world");
+
+    let mut content = vec![0u8; found_file.entry.file_size as usize];
+    fat_driver.read(&found_file.entry, &mut content);
+    serial_println!("{:#?}", str::from_utf8(&content).unwrap());
+
+    fat_driver.append(&mut found_file, b"Goodbye world");
+
+    let mut content = vec![0u8; found_file.entry.file_size as usize];
+    fat_driver.read(&found_file.entry, &mut content);
+    serial_println!("{:#?}", str::from_utf8(&content).unwrap()); */
+
+    // what happens if pass in /
+    fat_driver.create_dir("/MNT");
+    let found_file = fat_driver.find_file("/MNT").unwrap();
+    serial_println!("{:#?}", found_file);
+
+    /* let initramfs = include_bytes!("ustarfs.tar.gz");
+    let driver = USTAR::new(initramfs);
+    let entry = driver.file_lookup("README.md").unwrap();
+    let mut content = vec![0u8; octascii_to_dec(&entry.header.file_size)];
+    driver.read(entry, &mut content);
+    serial_println!("{:#?}", str::from_utf8(&content).unwrap()); */
 
     hlt_loop();
 }

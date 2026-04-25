@@ -3,8 +3,6 @@
 - Filesystem
     - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
     - FAT
-    - NVME device driver
-        - PCIe enumeration
 - Stack smash protector
 - Unit + Integraiton testing setup
 - TTY:
@@ -24,5 +22,8 @@
     - Floating windows
     - Borders
 - Sound
+- TCP/IP stack
+
+Pending:
 - Kernel debugger (quit & dump useful info on key press)
     -> see https://gitlab.com/bztsrc/minidbg
