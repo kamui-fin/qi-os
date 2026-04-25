@@ -73,7 +73,71 @@ impl<'a> USTAR<'a> {
         Self { fs_data }
     }
 
-    // pub fn read_dir(&self, path: &str) -> Vec<Header>;
+    pub fn read_dir(&self, query_path: &str) -> Vec<&Header> {
+        let mut entries = Vec::new();
+
+        let mut zero_count = 0;
+        let mut start = 0;
+        while zero_count < 2 {
+            if start + 512 > self.fs_data.len() {
+                break;
+            }
+
+            let header_bytes = &self.fs_data[start..(start + 512)];
+            let my_checksum = header_bytes.iter().map(|&b| b as usize).sum::<usize>()
+                - &header_bytes[148..156]
+                    .iter()
+                    .map(|&b| b as usize)
+                    .sum::<usize>()
+                + (0x20 * 8);
+
+            let header = unsafe { &*(header_bytes.as_ptr() as *const Header) };
+            let checksum = octascii_to_dec(&header.checkum);
+            if checksum != my_checksum {
+                serial_println!("[WARN] checksum mismatch");
+                break;
+            }
+            if is_zeroed(header_bytes) {
+                zero_count += 1;
+                start += 512;
+                continue;
+            }
+            zero_count = 0;
+
+            let parsed_prefix = CStr::from_bytes_until_nul(&header.filename_prefix)
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or("");
+
+            let parsed_name = CStr::from_bytes_until_nul(&header.file_name)
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or("");
+
+            let mut filename = if header.filename_prefix[0] != 0 {
+                format!("/{}/{}", parsed_prefix, parsed_name)
+            } else {
+                format!("/{}", parsed_name.to_string())
+            };
+
+            if filename.ends_with('/') {
+                filename.pop();
+            }
+
+            let file_size = octascii_to_dec(&header.file_size);
+            let file_size = ((file_size + 511) / 512) * 512;
+
+            let (parent, _) = filename.rsplit_once('/').unwrap_or_default();
+
+            if (parent == "" && "/" == query_path) || parent == query_path {
+                entries.push(header);
+            }
+
+            start += 512 + file_size;
+        }
+
+        entries
+    }
 
     // TODO: support offset
     pub fn read(&self, entry: TarEntry, buffer: &mut [u8], offset: usize) -> usize {

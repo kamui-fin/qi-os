@@ -164,7 +164,7 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
     spawn_proc(c"xiangqi", args.as_ptr(), 1); */
 
     // DRIVE + FILESYSTEM TESTING
-    let driver = AtaDriver::new(
+    /* let driver = AtaDriver::new(
         kernel::driver::ata::BusType::Primary,
         kernel::driver::ata::DriveType::Slave,
     );
@@ -176,7 +176,7 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
     let mut fs_info = vec![0u8; SECTOR];
     driver.read(bpb.fs_info as u64, 1, &mut fs_info);
     let fs_info = unsafe { &*(fs_info.as_ptr() as *const FSInfo) };
-    let fat_driver = Fat32::new(bpb, fs_info, driver);
+    let fat_driver = Fat32::new(bpb, fs_info, driver); */
 
     /* let path = "/DIR/onesec.txt";
     fat_driver.create_file(path);
@@ -196,16 +196,19 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
     serial_println!("{:#?}", str::from_utf8(&content).unwrap()); */
 
     // what happens if pass in /
-    fat_driver.create_dir("/MNT");
+    /* fat_driver.create_dir("/MNT");
     let found_file = fat_driver.find_file("/MNT").unwrap();
-    serial_println!("{:#?}", found_file);
+    serial_println!("{:#?}", found_file); */
 
-    /* let initramfs = include_bytes!("ustarfs.tar.gz");
+    let initramfs = include_bytes!("ustarfs.tar.gz");
     let driver = USTAR::new(initramfs);
-    let entry = driver.file_lookup("README.md").unwrap();
+
+    /* let entry = driver.file_lookup("README.md").unwrap();
     let mut content = vec![0u8; octascii_to_dec(&entry.header.file_size)];
     driver.read(entry, &mut content);
     serial_println!("{:#?}", str::from_utf8(&content).unwrap()); */
+
+    let entries = driver.read_dir("/userland/src");
 
     hlt_loop();
 }
