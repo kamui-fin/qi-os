@@ -8,7 +8,7 @@ use alloc::vec::{self, Vec};
 use bitflags::bitflags;
 use x86_64::instructions::port::Port;
 
-use crate::{driver::cmos::get_rtc_time, fs::fat::RawDisk};
+use crate::{driver::cmos::get_rtc_time, fs::fat::BlockDevice};
 
 const PRIMARY_BASE_REGISTER: u16 = 0x1F0;
 const PRIMARY_CONTROL_REGISTER: u16 = 0x3F6;
@@ -223,7 +223,7 @@ impl AtaDriver {
     }
 }
 
-impl RawDisk for AtaDriver {
+impl BlockDevice for AtaDriver {
     fn read(&self, lba: u64, sectors: u8, buffer: &mut [u8]) -> Result<usize, AtaError> {
         let actual_sectors: usize = if sectors == 0 { 256 } else { sectors as usize };
         let (sector_capacity, leftover) = (buffer.len().div_ceil(512), buffer.len() % 512);

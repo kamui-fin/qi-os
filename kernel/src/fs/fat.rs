@@ -1,6 +1,7 @@
 // CAUTION: this fat driver is very much still a rough sketch.
 //
 // TODO:
+// - last access date update
 // - fix O(n) find free cluster
 // - respect READ_ONLY
 // - write to multiple FATs
@@ -9,13 +10,19 @@
 
 use core::mem;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{slice, vec};
 use bitflags::bitflags;
+use spin::Mutex;
 use x86_64::align_down;
 
+use crate::driver::cmos::get_unix_time;
+use crate::fs::vfs::{FsOperations, INode, NodeType, SuperBlock};
 use crate::interrupts::{BOOT_RTC, ELAPSED};
 use crate::{driver::ata::AtaError, serial_println};
+
+use super::vfs;
 
 const EOC: u32 = 0x0FFFFFFF;
 
@@ -166,7 +173,7 @@ bitflags! {
     }
 }
 
-pub struct Fat32<'a, D: RawDisk> {
+pub struct Fat32<'a, D: BlockDevice> {
     bpb: &'a BPB,
     fs_info: &'a FSInfo,
     disk: D,
@@ -204,13 +211,49 @@ fn is_valid_next(val: u32) -> bool {
     val >= 2 && val <= 0x0FFFFFEF
 }
 
+fn get_fat_timedate() -> (u16, u16) {
+    let unix_time = get_unix_time();
+
+    // format unix_time into <hour 5 bit><minute 6 bit><sec 5 bit>
+    let seconds_in_day = unix_time % 86400;
+    let hour = (seconds_in_day / 3600) as u16;
+    let minute = ((seconds_in_day % 3600) / 60) as u16;
+    let second = (seconds_in_day % 60) as u16;
+    let fat_time = (hour << 11) | (minute << 5) | (second / 2);
+
+    // format unix_time into <year 7 bit><month 4 bit><day 5 bit>
+
+    // https://howardhinnant.github.io/date_algorithms.html
+    let days_since_epoch = (unix_time / 86400) as i32;
+    // shift epoch from 1970-01-01 to 0000-03-01 for easier leap year math
+    let z = days_since_epoch + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i32) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    // fat32 year 0 = 1980
+    let fat_year = if year >= 1980 {
+        (year - 1980) as u16
+    } else {
+        0
+    };
+    let fat_date = (fat_year << 9) | ((m as u16) << 5) | (d as u16);
+
+    (fat_time, fat_date)
+}
+
 // TODO: make Error type generic!
-pub trait RawDisk {
+pub trait BlockDevice {
     fn read(&self, lba: u64, sectors: u8, buffer: &mut [u8]) -> Result<usize, AtaError>;
     fn write(&self, lba: u64, data: &[u8]) -> Result<(), AtaError>;
 }
 
-impl<'a, D: RawDisk> Fat32<'a, D> {
+impl<'a, D: BlockDevice> Fat32<'a, D> {
     fn cluster_to_lba(&self, cluster: u32) -> u32 {
         self.data_start + (cluster - 2) * self.bpb.sectors_per_cluster as u32
     }
@@ -239,13 +282,13 @@ impl<'a, D: RawDisk> Fat32<'a, D> {
         }
     }
 
-    pub fn read(&self, dir: &DirEntry, buffer: &mut [u8]) -> usize {
-        let target_read_bytes = core::cmp::min(buffer.len(), dir.file_size as usize);
+    pub fn read_buffer(&self, dir: &DirEntryWithLoc, buffer: &mut [u8]) -> usize {
+        let target_read_bytes = core::cmp::min(buffer.len(), dir.entry.file_size as usize);
         if target_read_bytes == 0 {
             return 0;
         }
 
-        let mut cluster = (dir.first_cluster_high as u32) << 16 | (dir.first_cluster_low as u32);
+        let mut cluster = dir.entry.first_cluster();
         let mut bytes_read = 0;
 
         let cluster_bytes = self.bpb.sectors_per_cluster as usize * 512;
@@ -519,7 +562,7 @@ impl<'a, D: RawDisk> Fat32<'a, D> {
         }
     }
 
-    pub fn write(&self, dir: &mut DirEntryWithLoc, offset: usize, buffer: &[u8]) {
+    pub fn write_buffer(&self, dir: &mut DirEntryWithLoc, offset: usize, buffer: &[u8]) {
         let cluster_bytes = self.bpb.sectors_per_cluster as usize * 512;
 
         let required_size = offset + buffer.len();
@@ -606,10 +649,6 @@ impl<'a, D: RawDisk> Fat32<'a, D> {
             )
         };
         self.write_cluster(dirloc.loc.cluster, dirloc.loc.offset as usize, bytes);
-    }
-
-    pub fn append(&self, dir: &mut DirEntryWithLoc, buffer: &[u8]) {
-        self.write(dir, dir.entry.file_size as usize, buffer)
     }
 
     fn get_free_dirent_pos(&self, first_cluster: u32) -> Option<ClusterOffset> {
@@ -800,6 +839,29 @@ impl<'a, D: RawDisk> Fat32<'a, D> {
         self.update_dir(&new_dir_with_loc);
     }
 
+    pub fn mv(&self, path: &str, to: &str) {
+        let mut dirent = self.find_file(path).unwrap();
+
+        let (_, child) = to.rsplit_once("/").unwrap();
+        let (name_str, ext_str) = match child.rsplit_once(".") {
+            Some((n, e)) => (n, e),
+            None => (child, ""),
+        };
+        let mut name: [u8; 8] = [0x20; 8];
+        let mut ext: [u8; 3] = [0x20; 3];
+        for (i, c) in name_str.chars().take(8).enumerate() {
+            name[i] = c.to_ascii_uppercase() as u8;
+        }
+        for (i, c) in ext_str.chars().take(8).enumerate() {
+            ext[i] = c.to_ascii_uppercase() as u8;
+        }
+
+        dirent.entry.name = name;
+        dirent.entry.ext = ext;
+
+        self.update_dir(&dirent);
+    }
+
     pub fn delete_file(&self, path: &str) {
         let mut dirent = self.find_file(path).unwrap();
         dirent.entry.name[0] = 0xE5;
@@ -827,44 +889,114 @@ impl<'a, D: RawDisk> Fat32<'a, D> {
             self.update_dir(&dirent);
         }
     }
+
+    pub fn get_root_inode(
+        &self,
+        ops: Arc<dyn FsOperations>,
+        superblock: Arc<SuperBlock>,
+    ) -> alloc::sync::Arc<INode> {
+        let dirent = self.find_file("/").unwrap().entry;
+        Arc::new(INode {
+            inum: dirent.first_cluster() as u64,
+            fs: superblock,
+            meta: Mutex::new(vfs::INodeMetadata {
+                size: dirent.file_size as usize,
+                mtime: 0,
+            }),
+            mode: vfs::NodeType::Directory,
+            ops,
+        })
+    }
+
+    fn get_dir_entry(&self, inum: u64) -> DirEntryWithLoc {
+        // inum is the byte offset in disk of DirEntry
+        // convert to sector offset and read 32 bytes
+        let mut buffer = [0; 512];
+        let offset = (inum & 0x1FF) as usize;
+        self.disk.read(inum >> 9, 1, &mut buffer);
+
+        let entry_bytes = &buffer[offset..(offset + 32)];
+        let dir = unsafe { core::ptr::read_unaligned(entry_bytes.as_ptr() as *const DirEntry) };
+
+        // just reorganizing formula
+        let bytes_per_cluster = (self.bpb.sectors_per_cluster as u64) * 512;
+        let data_start_bytes = self.data_start as u64 * 512;
+        let relative_bytes = inum - data_start_bytes;
+        let cluster = (relative_bytes / bytes_per_cluster) as u32 + 2;
+        let offset = (relative_bytes % bytes_per_cluster) as u32;
+
+        DirEntryWithLoc {
+            entry: dir,
+            loc: ClusterOffset { cluster, offset },
+        }
+    }
 }
 
-fn get_fat_timedate() -> (u16, u16) {
-    let elapsed_sec = ELAPSED
-        .load(core::sync::atomic::Ordering::Relaxed)
-        .div_ceil(1000) as usize;
-    let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
-    let unix_time = elapsed_sec + boot_unix;
+impl<'a, D: BlockDevice + Sync + Send> FsOperations for Fat32<'a, D> {
+    fn lookup(&self, parent: Arc<INode>, path: &str) -> Option<INode> {
+        let to_inode = |d: DirEntryWithLoc| {
+            let bytes_per_cluster = (self.bpb.sectors_per_cluster as usize) * 512;
+            let data_start_bytes = self.data_start as u64 * 512;
 
-    // format unix_time into <hour 5 bit><minute 6 bit><sec 5 bit>
-    let seconds_in_day = unix_time % 86400;
-    let hour = (seconds_in_day / 3600) as u16;
-    let minute = ((seconds_in_day % 3600) / 60) as u16;
-    let second = (seconds_in_day % 60) as u16;
-    let fat_time = (hour << 11) | (minute << 5) | (second / 2);
+            let inum = data_start_bytes
+                + (d.loc.cluster - 2) as u64 * bytes_per_cluster as u64
+                + d.loc.offset as u64;
 
-    // format unix_time into <year 7 bit><month 4 bit><day 5 bit>
+            let mode = if d.entry.attr.contains(DirEntryFlags::FAT_ATTR_DIRECTORY) {
+                NodeType::Directory
+            } else {
+                NodeType::File
+            };
 
-    // https://howardhinnant.github.io/date_algorithms.html
-    let days_since_epoch = (unix_time / 86400) as i32;
-    // shift epoch from 1970-01-01 to 0000-03-01 for easier leap year math
-    let z = days_since_epoch + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = (yoe as i32) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    // fat32 year 0 = 1980
-    let fat_year = if year >= 1980 {
-        (year - 1980) as u16
-    } else {
-        0
-    };
-    let fat_date = (fat_year << 9) | ((m as u16) << 5) | (d as u16);
+            INode {
+                inum,
+                fs: parent.fs.clone(),
+                meta: Mutex::new(vfs::INodeMetadata {
+                    size: d.entry.file_size as usize,
+                    mtime: 0,
+                }),
+                mode,
+                ops: parent.ops.clone(),
+            }
+        };
 
-    (fat_time, fat_date)
+        let dir = self.find_file(path);
+        dir.map(|d| to_inode(d))
+    }
+
+    fn read(&self, node: Arc<INode>, buffer: &mut [u8]) {
+        let dir = self.get_dir_entry(node.inum);
+        self.read_buffer(&dir, buffer);
+    }
+
+    fn write(&self, node: Arc<INode>, offset: usize, buffer: &[u8]) {
+        let mut dir = self.get_dir_entry(node.inum);
+        self.write_buffer(&mut dir, offset, buffer)
+    }
+
+    fn append(&self, node: Arc<INode>, buffer: &[u8]) {
+        let mut dir = self.get_dir_entry(node.inum);
+        let size = dir.entry.file_size;
+        self.write_buffer(&mut dir, size as usize, buffer)
+    }
+
+    fn touch(&self, path: &str) {
+        self.create_file(path);
+    }
+
+    fn rename(&self, path: &str, to: &str) {
+        self.mv(path, to);
+    }
+
+    fn mkdir(&self, path: &str) {
+        self.create_dir(path);
+    }
+
+    fn rmdir(&self, path: &str) {
+        self.delete_dir(path);
+    }
+
+    fn delete(&self, path: &str) {
+        self.delete_file(path);
+    }
 }

@@ -24,10 +24,10 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
-use kernel::driver::ata::AtaDriver;
 use kernel::driver::cmos::get_rtc_time;
-use kernel::fs::fat::{FSInfo, Fat32, RawDisk, BPB};
+use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
+use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::interrupts::spawn_proc;
 use kernel::mem::allocator::init_heap;
@@ -155,60 +155,16 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         // For now, compositor is just a kernel task
         /* scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ()); */
+        /* let args = [c"test".as_ptr()];
+        spawn_proc(c"xiangqi", args.as_ptr(), 1); */
     }
+
+    init_vfs();
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
 
-    /* let args = [c"test".as_ptr()];
-    spawn_proc(c"xiangqi", args.as_ptr(), 1); */
-
-    // DRIVE + FILESYSTEM TESTING
-    /* let driver = AtaDriver::new(
-        kernel::driver::ata::BusType::Primary,
-        kernel::driver::ata::DriveType::Slave,
-    );
-    let info = driver.availability();
-    const SECTOR: usize = 512;
-    let mut bpb = vec![0u8; SECTOR];
-    driver.read(0, 1, &mut bpb);
-    let bpb = unsafe { &*(bpb.as_ptr() as *const BPB) };
-    let mut fs_info = vec![0u8; SECTOR];
-    driver.read(bpb.fs_info as u64, 1, &mut fs_info);
-    let fs_info = unsafe { &*(fs_info.as_ptr() as *const FSInfo) };
-    let fat_driver = Fat32::new(bpb, fs_info, driver); */
-
-    /* let path = "/DIR/onesec.txt";
-    fat_driver.create_file(path);
-    let mut found_file = fat_driver.find_file(path).unwrap();
-    serial_println!("{:#?}", found_file);
-
-    fat_driver.append(&mut found_file, b"Hello world");
-
-    let mut content = vec![0u8; found_file.entry.file_size as usize];
-    fat_driver.read(&found_file.entry, &mut content);
-    serial_println!("{:#?}", str::from_utf8(&content).unwrap());
-
-    fat_driver.append(&mut found_file, b"Goodbye world");
-
-    let mut content = vec![0u8; found_file.entry.file_size as usize];
-    fat_driver.read(&found_file.entry, &mut content);
-    serial_println!("{:#?}", str::from_utf8(&content).unwrap()); */
-
-    // what happens if pass in /
-    /* fat_driver.create_dir("/MNT");
-    let found_file = fat_driver.find_file("/MNT").unwrap();
-    serial_println!("{:#?}", found_file); */
-
-    let initramfs = include_bytes!("ustarfs.tar.gz");
-    let driver = USTAR::new(initramfs);
-
-    /* let entry = driver.file_lookup("README.md").unwrap();
-    let mut content = vec![0u8; octascii_to_dec(&entry.header.file_size)];
-    driver.read(entry, &mut content);
-    serial_println!("{:#?}", str::from_utf8(&content).unwrap()); */
-
-    let entries = driver.read_dir("/userland/src");
+    let root = get_root_dentry();
 
     hlt_loop();
 }

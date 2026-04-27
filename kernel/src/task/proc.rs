@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use elf::abi::PT_LOAD;
 use elf::endian::LittleEndian;
 use elf::ElfBytes;
-use spin::Mutex;
+use slab::Slab;
+use spin::{Mutex, RwLock};
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::page::PageRangeInclusive;
 use x86_64::structures::paging::page_table::PageTableEntry;
@@ -24,8 +25,10 @@ use x86_64::{
     VirtAddr,
 };
 
+use crate::fs::vfs::{DEntry, File};
+use crate::task::thread::CURR_THREAD_PTR;
 use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
-use crate::{serial_println, BOOT_INFO};
+use crate::{serial_println, BOOT_INFO, PROC};
 
 pub static ECHO_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_echo"));
 pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xiangqi"));
@@ -41,6 +44,9 @@ pub struct ProcessControlBlock<'a> {
     pub heap_end: VirtAddr,
     pub name: &'static str,
     pub backbuffer_frames: Option<Vec<PhysFrame>>,
+
+    pub cwd: Arc<RwLock<DEntry>>,
+    pub fd: Slab<Arc<File>>,
 }
 
 const USER_STACK_SIZE: usize = 64 * 1024;
@@ -82,6 +88,7 @@ impl<'a> ProcessControlBlock<'a> {
         c_argv: *const *const core::ffi::c_char,
         argc: usize,
         program: &'static CStr,
+        directory: Arc<RwLock<DEntry>>,
     ) -> Self {
         // Paging, start with kernel mapped
         let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
@@ -352,6 +359,36 @@ impl<'a> ProcessControlBlock<'a> {
             heap_end: heap_start,
             name: program.to_str().unwrap(),
             backbuffer_frames: None,
+            cwd: directory,
+            fd: Slab::with_capacity(10),
         }
     }
+}
+
+pub fn with_curr_proc_mut<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut ProcessControlBlock) -> R,
+{
+    let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
+    let mut procs = PROC.get().unwrap().lock();
+    let curr_proc = procs
+        .iter_mut()
+        .find(|p| p.tcb.lock().id == curr_thread_id)
+        .unwrap();
+
+    f(curr_proc)
+}
+
+pub fn with_curr_proc<F, R>(f: F) -> R
+where
+    F: FnOnce(&ProcessControlBlock) -> R,
+{
+    let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
+    let procs = PROC.get().unwrap().lock();
+    let curr_proc = procs
+        .iter()
+        .find(|p| p.tcb.lock().id == curr_thread_id)
+        .unwrap();
+
+    f(curr_proc)
 }

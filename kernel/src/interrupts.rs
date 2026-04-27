@@ -11,6 +11,7 @@ use core::sync::atomic::AtomicUsize;
 use crate::driver::cmos::get_rtc_time;
 use crate::driver::cmos::RTCTime;
 use crate::driver::mouse::GenericPs2Packet;
+use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
 use crate::print;
 use crate::println;
@@ -417,7 +418,7 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
             panic!("unrecognized program")
         }
     };
-    let proc = ProcessControlBlock::from_bytes(binary, argv, argc, program);
+    let proc = ProcessControlBlock::from_bytes(binary, argv, argc, program, get_root_dentry());
     let id = proc.tcb.lock().id;
     let tcb_clone = proc.tcb.clone();
 

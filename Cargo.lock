@@ -185,6 +185,7 @@ dependencies = [
  "log",
  "pc-keyboard",
  "pic8259",
+ "slab",
  "spin 0.5.2",
  "uart_16550",
  "userland",

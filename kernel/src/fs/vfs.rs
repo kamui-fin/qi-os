@@ -1,129 +1,336 @@
-use alloc::boxed::Box;
+use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
-use alloc::{rc::Weak, sync::Arc};
-use bitflags::bitflags;
-use spin::RwLock;
+use alloc::sync::Arc;
+use alloc::vec;
+use conquer_once::spin::OnceCell;
+use spin::{Mutex, RwLock};
 
-enum FsType {
+use crate::driver::ata::{AtaDriver, BusType, DriveType};
+use crate::driver::cmos::get_unix_time;
+use crate::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
+use crate::fs::ustar::USTAR;
+use crate::task::proc::{with_curr_proc, with_curr_proc_mut};
+
+pub enum FsType {
     Fat32,
     Ustar,
 }
 
-enum MountSource {
+pub enum MountSource {
     Device(String),
     NoDev(String),
 }
 
 // Metadata about a specific mounted file system (total size, block size, etc.).
-struct SuperBlock {
-    fs_type: FsType,
-    magic: u64,
-
-    num_blocks: usize,
-    num_inodes: usize,
-
-    root_inode: Arc<INode>,
-
-    device: MountSource,
-    mountpoint: Arc<DEntry>,
+pub struct SuperBlock {
+    pub fs_type: FsType,
 }
 
-pub trait SuperblockOperations {
-    fn alloc_inode();
-    fn destroy_inode();
-    fn write_inode();
-    fn sync_fs();
-    fn statfs();
-}
-
-enum Mode {
+pub enum NodeType {
     File,
     Directory,
 }
 
 // Represents a physical file on the disk. It holds metadata (permissions, owner) but not the filename.
-struct INode {
-    inum: u64,
-    fs: Arc<SuperBlock>,
+pub struct INode {
+    pub inum: u64,
+    pub fs: Arc<SuperBlock>,
+    pub mode: NodeType, // file, dir, etc.
 
-    size: usize,
-    mode: Mode, // file, dir, etc.
-    nlink: u64,
+    pub meta: spin::Mutex<INodeMetadata>,
 
-    atime: u64, // access time
-    mtime: u64, // content OR metadata changes
-
-                /* i_op: Box<dyn INodeOperations>,
-                f_op: Box<dyn FileOperations>, */
+    pub ops: Arc<dyn FsOperations>,
 }
 
-pub trait INodeOperations {
-    fn create();
-    fn lookup();
-    fn rename();
-    fn mkdir();
-    fn rmdir();
-    fn link();
-    fn unlink();
+pub struct INodeMetadata {
+    pub size: usize,
+    pub mtime: u64, // content OR metadata changes
+}
 
-    /* fn mknod();
-    fn getattr();
-    fn setattr(); */
+pub trait FsOperations: Send + Sync {
+    fn lookup(&self, parent: Arc<INode>, path: &str) -> Option<INode>;
+
+    // TODO: support offset reading
+    fn read(&self, node: Arc<INode>, buffer: &mut [u8]);
+    fn write(&self, node: Arc<INode>, offset: usize, buffer: &[u8]);
+    fn append(&self, node: Arc<INode>, buffer: &[u8]);
+
+    fn touch(&self, path: &str);
+    fn rename(&self, path: &str, to: &str);
+    fn mkdir(&self, path: &str);
+    fn rmdir(&self, path: &str);
+    fn delete(&self, path: &str);
 }
 
 // (Directory Entry). Links an Inode to a name. This is how the system resolves paths like /home/user.
-struct DEntry {
-    name: String,
-    inode: Arc<INode>,
-    parent: Weak<RwLock<DEntry>>,
-    mount_structure: Option<Arc<MountPoint>>,
-    flags: u8,
+pub struct DEntry {
+    pub name: String,
+    pub inode: Arc<INode>,
+    pub parent: Option<alloc::sync::Weak<RwLock<DEntry>>>, // None if root
+    // cache of children we alr looked up
+    pub children: RwLock<BTreeMap<String, Arc<RwLock<DEntry>>>>,
 }
 
-struct MountPoint {
-    source: Arc<DEntry>,
-    root: Arc<DEntry>,
-    sb: SuperBlock,
+pub static MOUNT_TABLE: OnceCell<MountTable> = OnceCell::uninit();
+
+pub struct Mount {
+    pub root: Arc<RwLock<DEntry>>,
+    pub mountpoint: Arc<RwLock<DEntry>>,
+    pub sb: Arc<SuperBlock>,
 }
 
-type MountTable = alloc::collections::BTreeMap<String, MountPoint>;
+pub type MountTable = alloc::collections::BTreeMap<String, Mount>;
 
-enum OpenFlag {
+pub enum OpenFlag {
     ReadOnly,
     WriteOnly,
-    ReadWrite,
+    AppendOnly,
 }
 
-/*
-* File operations:
-* - llseek,
-* - read / write,
-* - iterate,
-* - poll,
-* - unlocked_ioctl,
-* - mmap,
-* - open,
-* - release,
-* - fsync
-*/
+pub type Fd = u64;
 
 // Represents a file opened by a process. It tracks the current offset (where the cursor is) and the mode (read/write).
-struct File {
-    inode: Arc<INode>,
-    position: usize,
-    flag: OpenFlag,
+pub struct File {
+    pub inode: Arc<INode>,
+    pub pos: Mutex<usize>,
+    pub flag: OpenFlag,
 }
 
-pub trait FileOperations {
-    /* fn llseek();
-    fn iterate();
-    fn poll();
-    fn unlocked_ioctl();
-    fn mmap();
-    fn fsync(); */
+// TODO: when we have IPC and /dev/xxx
+/* pub enum FileDescriptor {
+    Pipe(Pipe),
+    CharacterDevice(CharDev),
+    DiskFile(File),
+} */
 
-    fn read();
-    fn write();
-    fn open();
-    fn release();
+// NOTE: ensure sanitized to absolute paths before passed to VFS layer
+fn find_mountpoint(path: &str) -> &Mount {
+    let table = MOUNT_TABLE.try_get().unwrap();
+    let mut curr_path = path;
+
+    while !curr_path.is_empty() {
+        let last_slash = curr_path.rfind('/').unwrap();
+        let (parent, _) = curr_path.split_at(last_slash);
+        if let Some(mp) = table.get(parent) {
+            return mp;
+        }
+        curr_path = parent;
+    }
+
+    table.get("/").unwrap()
+}
+
+pub fn get_root_dentry() -> Arc<RwLock<DEntry>> {
+    MOUNT_TABLE.get().unwrap().get("/").unwrap().root.clone()
+}
+
+pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
+    // TODO: make sure path is abs or relative, if relative, combine with CWD
+    let mount = find_mountpoint(path);
+    let mut current = mount.root.clone();
+    for segment in path[1..].split('/').filter(|p| !p.is_empty()) {
+        let child_cached = {
+            let main_guard = current.read();
+            let child_guard = main_guard.children.read();
+            child_guard.get(segment).cloned()
+        };
+        if let Some(child) = child_cached {
+            current = child;
+        } else {
+            // lookup
+            let disk_lookup = {
+                let main_guard = current.read();
+                main_guard
+                    .inode
+                    .ops
+                    .lookup(main_guard.inode.clone(), segment)
+            };
+            if let Some(node) = disk_lookup {
+                let dentry = Arc::new(RwLock::new(DEntry {
+                    name: segment.into(),
+                    inode: Arc::new(node),
+                    parent: Some(Arc::downgrade(&current)),
+                    children: RwLock::new(BTreeMap::new()),
+                }));
+                let dentry_clone = dentry.clone();
+                // add it to parent cache
+                current
+                    .read()
+                    .children
+                    .write()
+                    .insert(segment.into(), dentry);
+
+                current = dentry_clone;
+            } else {
+                return None;
+            }
+        }
+    }
+
+    Some(current)
+}
+
+pub fn write(fd: Fd, buf: &mut [u8]) -> usize {
+    with_curr_proc_mut(|p| {
+        let file = p.fd.get_mut(fd as usize).unwrap().clone();
+        let mut pos = file.pos.lock();
+
+        let size = file.inode.meta.lock().size;
+        let val_to_add;
+        if let OpenFlag::AppendOnly = file.flag {
+            val_to_add = size + buf.len();
+            file.inode.ops.append(file.inode.clone(), buf);
+
+            file.inode.meta.lock().size += buf.len();
+
+            *pos = val_to_add;
+        } else {
+            // TODO: allow write to exceed file size
+            val_to_add = if *pos + buf.len() >= size {
+                size.saturating_sub(*pos)
+            } else {
+                buf.len()
+            };
+            file.inode.ops.write(file.inode.clone(), *pos, buf);
+            *pos += val_to_add;
+        }
+
+        file.inode.meta.lock().mtime = get_unix_time() as u64;
+        val_to_add
+    })
+}
+
+pub fn read(fd: Fd, buf: &mut [u8]) -> usize {
+    with_curr_proc(|p| {
+        let file = p.fd.get(fd as usize).unwrap().clone();
+        file.inode.ops.read(file.inode.clone(), buf);
+
+        let mut pos = file.pos.lock();
+        let size = file.inode.meta.lock().size;
+        let val_to_add = if *pos + buf.len() >= size {
+            size - *pos
+        } else {
+            buf.len()
+        };
+        *pos += val_to_add;
+        val_to_add
+    })
+}
+
+pub fn open(path: &str, flag: OpenFlag) -> Option<Fd> {
+    let mp = find_mountpoint(path);
+    // "/mnt/dir/file" -> "/dir/file"
+    let mp_root_path = &mp.mountpoint.read().name;
+    let rel_path = if mp_root_path == "/" {
+        path
+    } else {
+        path.strip_prefix(mp_root_path).unwrap()
+    };
+    let mp_root = mp.root.read();
+    let inode = mp_root.inode.ops.lookup(mp_root.inode.clone(), rel_path);
+    if let Some(inode) = inode {
+        let file = Arc::new(File {
+            inode: Arc::new(inode),
+            pos: Mutex::new(0),
+            flag,
+        });
+
+        let fd = with_curr_proc_mut(|p| {
+            let entry = p.fd.vacant_key();
+            p.fd.insert(file);
+            entry as u64
+        });
+
+        return Some(fd);
+    }
+
+    None
+}
+
+// for now, all close does is delete File from PCB
+pub fn close(fd: Fd) {
+    with_curr_proc_mut(|p| {
+        p.fd.remove(fd as usize);
+    });
+}
+
+// TODO:
+//  - getdents
+//  - lseek(fd, n)
+//  - mount(fs, path)
+//  - umount(path)
+//  - stat(path)
+//  - ...
+
+pub fn mount_fat32(table: &mut MountTable, mount_path: &str) {
+    let driver = AtaDriver::new(BusType::Primary, DriveType::Slave);
+    let _ = driver.availability();
+    const SECTOR: usize = 512;
+    let mut bpb = vec![0u8; SECTOR];
+    driver.read(0, 1, &mut bpb).unwrap();
+    let bpb = unsafe { &*(bpb.as_ptr() as *const BPB) };
+    let mut fs_info = vec![0u8; SECTOR];
+    driver.read(bpb.fs_info as u64, 1, &mut fs_info).unwrap();
+    let fs_info = unsafe { &*(fs_info.as_ptr() as *const FSInfo) };
+
+    let fat_driver = Arc::new(Fat32::new(bpb, fs_info, driver));
+    let fat_sb = Arc::new(SuperBlock {
+        fs_type: FsType::Fat32,
+    });
+    let fat_root_inode: Arc<INode> = fat_driver.get_root_inode(fat_driver.clone(), fat_sb.clone());
+    let fat_root_dent = Arc::new(RwLock::new(DEntry {
+        name: "/".into(),
+        inode: Arc::clone(&fat_root_inode),
+        parent: None,
+        children: RwLock::new(BTreeMap::new()),
+    }));
+    let fatfs = Mount {
+        root: Arc::clone(&fat_root_dent),
+        mountpoint: Arc::clone(&fat_root_dent),
+        sb: fat_sb,
+    };
+    table.insert(mount_path.into(), fatfs);
+}
+
+pub fn mount_initramfs(table: &mut MountTable, mount_path: &str) {
+    let ustar = USTAR::new(include_bytes!("../ustarfs.tar.gz"));
+    let ustar_sb = Arc::new(SuperBlock {
+        fs_type: FsType::Ustar,
+    });
+    let ustar_root_inode: Arc<INode> = ustar.get_root_inode();
+    let ustar_root_dent = Arc::new(RwLock::new(DEntry {
+        name: "/".into(),
+        inode: Arc::clone(&ustar_root_inode),
+        parent: None,
+        children: RwLock::new(BTreeMap::new()),
+    }));
+    let ustarfs = Mount {
+        root: Arc::clone(&ustar_root_dent),
+        mountpoint: Arc::clone(&ustar_root_dent),
+        sb: ustar_sb,
+    };
+
+    table.insert(mount_path.into(), ustarfs);
+}
+
+pub fn init_vfs() {
+    let mut table: MountTable = MountTable::new();
+    mount_fat32(&mut table, "/");
+    mount_initramfs(&mut table, "/init");
+
+    MOUNT_TABLE.init_once(|| table);
+}
+
+// Device Nodes
+
+enum DeviceNode {
+    Tty,
+    Console,
+}
+
+#[repr(u64)]
+enum StdFd {
+    Stdin,
+    Stderr,
+    Stdout,
 }

@@ -1,6 +1,9 @@
 use x86_64::instructions::port::Port;
 
-use crate::serial_println;
+use crate::{
+    interrupts::{BOOT_RTC, ELAPSED},
+    serial_println,
+};
 
 // get rtc from cmos
 //Basic flow
@@ -142,6 +145,14 @@ pub fn get_rtc_time() -> RTCTime {
 }
 
 // We'll use UNIX
+pub fn get_unix_time() -> u64 {
+    let elapsed_sec = ELAPSED
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .div_ceil(1000) as usize;
+    let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
+    let unix_time = elapsed_sec + boot_unix;
+    unix_time as u64
+}
 
 // maintain UTC time
 // convert to user local timezone

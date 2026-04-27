@@ -211,6 +211,10 @@ impl<'a> USTAR<'a> {
 
         None
     }
+
+    pub fn get_root_inode(&self) -> alloc::sync::Arc<super::vfs::INode> {
+        todo!()
+    }
 }
 
 fn is_zeroed(data: &[u8]) -> bool {

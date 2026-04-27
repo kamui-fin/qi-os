@@ -1,8 +1,6 @@
 # Roadmap
 
-- Filesystem
-    - USTAR on initrd into RAMFS. Test out general VFS API without relying on underlying filesystem
-    - FAT
+- VFS
 - Stack smash protector
 - Unit + Integraiton testing setup
 - TTY:
@@ -21,6 +19,8 @@
     - Wallpaper
     - Floating windows
     - Borders
+
+Wayyy into future:
 - Sound
 - TCP/IP stack
 
