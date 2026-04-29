@@ -2,9 +2,13 @@ mod transparent;
 
 use transparent::TransparentDrawTarget;
 use embedded_graphics::{
-    image::Image, 
-    pixelcolor::Rgb888, 
-    prelude::*
+    image::Image, mono_font::{MonoTextStyle,ascii::FONT_9X18_BOLD}, pixelcolor::Rgb888, 
+    prelude::*, primitives::Rectangle, text::Text
+};
+use embedded_text::{
+    alignment::{HorizontalAlignment, VerticalAlignment},
+    style::TextBoxStyleBuilder,
+    TextBox,
 };
 use embedded_graphics_simulator::{
     OutputSettings, SimulatorDisplay, SimulatorEvent, Window, 
@@ -62,6 +66,9 @@ pub fn get_img(piece: Piece) -> &'static [u8]{
     }
 
 fn drawboard(board: Board, display: &mut SimulatorDisplay<Rgb888>, window: &mut Window){
+    let gameboard: Tga<Rgb888> = Tga::from_slice(include_bytes!("assets/board.tga")).unwrap();
+    let game_board = Image::new(&gameboard, Point::new(0, 0));
+        game_board.draw( display);
     let mut filter = TransparentDrawTarget {
         target: display,
         transparent_color: Rgb888::BLACK,
@@ -87,21 +94,35 @@ fn drawboard(board: Board, display: &mut SimulatorDisplay<Rgb888>, window: &mut 
         c = 0;
         r +=1;
     }
+    
     window.update(&display);
+    
 }
 fn main() -> Result<(), core::convert::Infallible> {
     let mut display: SimulatorDisplay<Rgb888> = SimulatorDisplay::new(Size::new(1280, 1024));
     let mut window = Window::new("Xiangqi", &OutputSettings::default());
-    let tga1: Tga<Rgb888> = Tga::from_slice(include_bytes!("assets/board.tga")).unwrap();
-    let game_board = Image::new(&tga1, Point::new(0, 0));
-        game_board.draw(&mut display);
+
+    let character_style = MonoTextStyle::new(&FONT_9X18_BOLD,Rgb888::WHITE);
+
+    let textbox_style = TextBoxStyleBuilder::new()
+        .alignment(HorizontalAlignment::Left)
+        .vertical_alignment(VerticalAlignment::Top)
+        .build();
 
     let mut board = Board::default();
     drawboard(board, &mut display,&mut window);
-    let mut selected: Option<Piece> = None;
-    //let mut piece_moved = false;
     
+    let mut selected: Option<Piece> = None;
+    let mut redraw:bool = false;
+
     'Game: loop {
+    let turn_text = format!("Current Turn: {}", board.get_turn_color());
+        TextBox::with_textbox_style(
+            &turn_text,
+            Rectangle::new(Point { x: 900, y: 90 }, Size { width: 270, height: 180}),
+            character_style,
+            textbox_style,
+        ).draw(&mut display)?;
         for event in window.events() {
             match event {
                 SimulatorEvent::Quit => break 'Game,
@@ -121,14 +142,19 @@ fn main() -> Result<(), core::convert::Infallible> {
                             let m = Move::Piece(piece.pos, new_pos);
                             let result = board.play_move(m);
                             match result {
-                                GameResult::Continuing(next_turn) => {board = next_turn}
-                                GameResult::IllegalMove(_m) => {continue 'Game}
+                                GameResult::Continuing(next_turn) => {
+                                    board = next_turn; 
+                                    selected = None;
+                                    display.clear(Rgb888::BLACK).unwrap();
+                                    redraw = true;
+                                }
+                                GameResult::IllegalMove(_m) => {selected = None; continue 'Game}
                                 GameResult::Victory(_color) => {break 'Game}
                             }
                         }
                         None => {
                             if board.has_ally_piece(new_pos, board.get_turn_color()){
-                                selected = Some(board.get_piece(new_pos).unwrap())
+                                selected = Some(board.get_piece(new_pos).unwrap());
                             } else {continue 'Game}
                             
                         }
@@ -137,8 +163,8 @@ fn main() -> Result<(), core::convert::Infallible> {
                 _ => {}
             }
         }
-        drawboard(board, &mut display, &mut window)
+        //display.clear(Rgb888::BLACK).unwrap();
+        if redraw {drawboard(board, &mut display, &mut window);}
     }
-
     Ok(())
 }
