@@ -1,7 +1,20 @@
 _**The beginning of something big.**_
 
-# TODO
+## TODO
 
+## OS game
+
+    [ ] add graphics for legal moves 
+    [ ] add graphics for previous move
+    [ ] add graphics for check, mate, and resign
+    [ ] add loading screen 
+    [ ] add puzzel mode
+
+## Fixes
+
+    [ ] move byte parsing out of drawboard loop
+    [ ] refactor to heapless crate with fixed vector size
+    [ ]
 ## Draw Logic
 
     [ ] add counter for checks that resets if next move is not a check, 
