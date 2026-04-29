@@ -1,4 +1,5 @@
 #![no_std]
+use core::fmt;
 
 use crate::position::Position;
 
@@ -32,13 +33,28 @@ pub enum Color{
 }
 
 /// A color can be inverted using the `!` operator.
-/// `!Color::White` becomes `Color::Black` and vice versa.
 impl core::ops::Not for Color {
     type Output = Self;
     fn not(self) -> Self {
         match self {
             Self::Red => Self::Black,
             Self::Black => Self::Red,
+        }
+    }
+}
+impl fmt::Display for Color {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Color::Red => write!(f, "Red"),
+            Color::Black => write!(f, "Black"),
+        }
+    }
+}
+impl Color {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Color::Red => "Red",
+            Color::Black => "Black",
         }
     }
 }
