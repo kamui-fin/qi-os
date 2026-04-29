@@ -1,6 +1,10 @@
 # Roadmap
 
 - VFS
+    - Character devices
+    - Pipes
+    - /tmp 
+    - /proc
 - Stack smash protector
 - Unit + Integraiton testing setup
 - TTY:
@@ -11,10 +15,9 @@
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
-- IPC
-    - Shared memory 
-    - Message passing, streams, or sockets
 - Shell
+- Reboot feature
+- Random seed
 - Compositing:
     - Wallpaper
     - Floating windows

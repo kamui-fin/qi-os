@@ -1,13 +1,18 @@
+use core::any::Any;
+
+use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
+use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
+use crossbeam_queue::ArrayQueue;
 use spin::{Mutex, RwLock};
 
 use crate::driver::ata::{AtaDriver, BusType, DriveType};
 use crate::driver::cmos::get_unix_time;
-use crate::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
+use crate::fs::fat::{BlockDevice, DirEntryWithLoc, FSInfo, Fat32, BPB};
 use crate::fs::ustar::USTAR;
 use crate::task::proc::{with_curr_proc, with_curr_proc_mut};
 
@@ -16,12 +21,6 @@ pub enum FsType {
     Ustar,
 }
 
-pub enum MountSource {
-    Device(String),
-    NoDev(String),
-}
-
-// Metadata about a specific mounted file system (total size, block size, etc.).
 pub struct SuperBlock {
     pub fs_type: FsType,
 }
@@ -29,46 +28,64 @@ pub struct SuperBlock {
 pub enum NodeType {
     File,
     Directory,
+    Pipe,
+    CharDevice,
 }
 
-// Represents a physical file on the disk. It holds metadata (permissions, owner) but not the filename.
+pub enum INodeData {
+    Pipe(Arc<Pipe>),
+    Device { major: u8, minor: u8 },
+    FatFs(Mutex<DirEntryWithLoc>),
+}
+
 pub struct INode {
     pub inum: u64,
     pub fs: Arc<SuperBlock>,
-    pub mode: NodeType, // file, dir, etc.
 
-    pub meta: spin::Mutex<INodeMetadata>,
+    // these two MUST stay in sync
+    pub mode: NodeType,
+    pub data: INodeData,
 
-    pub ops: Arc<dyn FsOperations>,
+    pub meta: Mutex<FsMetadata>,
+
+    pub ops: Arc<dyn INodeOps>,
 }
 
-pub struct INodeMetadata {
+pub struct FsMetadata {
     pub size: usize,
     pub mtime: u64, // content OR metadata changes
 }
 
-pub trait FsOperations: Send + Sync {
-    fn lookup(&self, parent: Arc<INode>, path: &str) -> Option<INode>;
-
-    // TODO: support offset reading
-    fn read(&self, node: Arc<INode>, buffer: &mut [u8]);
-    fn write(&self, node: Arc<INode>, offset: usize, buffer: &[u8]);
-    fn append(&self, node: Arc<INode>, buffer: &[u8]);
-
-    fn touch(&self, path: &str);
-    fn rename(&self, path: &str, to: &str);
-    fn mkdir(&self, path: &str);
-    fn rmdir(&self, path: &str);
-    fn delete(&self, path: &str);
+pub trait FileOps: Send + Sync {
+    fn read(&self, file: &File, buffer: &mut [u8]);
+    fn write(&self, file: &File, buffer: &[u8]);
 }
 
-// (Directory Entry). Links an Inode to a name. This is how the system resolves paths like /home/user.
+pub trait INodeOps: Send + Sync {
+    fn read(&self, inode: &INode, offset: usize, buf: &mut [u8]) -> usize;
+    fn write(&self, inode: &INode, offset: usize, buf: &[u8]) -> usize;
+    fn lookup(&self, parent: &INode, name: &str) -> Option<INode>;
+    fn readdir(&self, dir: &INode) -> Vec<DEntryMinimal>;
+    fn create_file(&self, dir: &INode, name: &str);
+    fn rename(&self, node: &INode, to: &str);
+    fn mkdir(&self, dir: &INode, name: &str);
+    fn delete_file(&self, file: &INode);
+    fn rmdir(&self, dir: &INode);
+}
+
 pub struct DEntry {
     pub name: String,
     pub inode: Arc<INode>,
-    pub parent: Option<alloc::sync::Weak<RwLock<DEntry>>>, // None if root
+    pub parent: Option<Weak<RwLock<DEntry>>>, // None if root
     // cache of children we alr looked up
     pub children: RwLock<BTreeMap<String, Arc<RwLock<DEntry>>>>,
+}
+
+pub struct DEntryMinimal {
+    pub name: String,
+    pub inum: u32,
+    pub filetype: NodeType,
+    pub size: usize,
 }
 
 pub static MOUNT_TABLE: OnceCell<MountTable> = OnceCell::uninit();
@@ -87,21 +104,37 @@ pub enum OpenFlag {
     AppendOnly,
 }
 
-pub type Fd = u64;
-
-// Represents a file opened by a process. It tracks the current offset (where the cursor is) and the mode (read/write).
-pub struct File {
-    pub inode: Arc<INode>,
-    pub pos: Mutex<usize>,
-    pub flag: OpenFlag,
+#[repr(u64)]
+enum StdFd {
+    Stdin,
+    Stderr,
+    Stdout,
 }
 
-// TODO: when we have IPC and /dev/xxx
-/* pub enum FileDescriptor {
-    Pipe(Pipe),
-    CharacterDevice(CharDev),
-    DiskFile(File),
-} */
+pub type Fd = u64;
+
+pub struct File {
+    pub inode: Arc<INode>,
+
+    pub pos: Mutex<usize>,
+    pub flag: OpenFlag,
+
+    pub ops: Arc<dyn FileOps>,
+}
+
+pub struct Pipe {
+    buffer: ArrayQueue<u8>,
+    readers: usize,
+    writers: usize,
+    /* rd_queue: WaitQueue,
+    wr_queue: WaitQueue, */
+}
+
+pub struct Device {
+    ops: Arc<dyn FileOps>,
+}
+
+pub static DEVICE_TABLE: OnceCell<Vec<Device>> = OnceCell::uninit();
 
 // NOTE: ensure sanitized to absolute paths before passed to VFS layer
 fn find_mountpoint(path: &str) -> &Mount {
@@ -140,15 +173,12 @@ pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
             // lookup
             let disk_lookup = {
                 let main_guard = current.read();
-                main_guard
-                    .inode
-                    .ops
-                    .lookup(main_guard.inode.clone(), segment)
+                main_guard.inode.ops.lookup(&main_guard.inode, segment)
             };
             if let Some(node) = disk_lookup {
                 let dentry = Arc::new(RwLock::new(DEntry {
                     name: segment.into(),
-                    inode: Arc::new(node),
+                    inode: node.into(),
                     parent: Some(Arc::downgrade(&current)),
                     children: RwLock::new(BTreeMap::new()),
                 }));
@@ -170,7 +200,7 @@ pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
     Some(current)
 }
 
-pub fn write(fd: Fd, buf: &mut [u8]) -> usize {
+pub fn sys_write(fd: Fd, buf: &mut [u8]) -> usize {
     with_curr_proc_mut(|p| {
         let file = p.fd.get_mut(fd as usize).unwrap().clone();
         let mut pos = file.pos.lock();
@@ -179,7 +209,9 @@ pub fn write(fd: Fd, buf: &mut [u8]) -> usize {
         let val_to_add;
         if let OpenFlag::AppendOnly = file.flag {
             val_to_add = size + buf.len();
-            file.inode.ops.append(file.inode.clone(), buf);
+            file.inode
+                .ops
+                .write(&file.inode, file.inode.meta.lock().size, buf);
 
             file.inode.meta.lock().size += buf.len();
 
@@ -191,7 +223,7 @@ pub fn write(fd: Fd, buf: &mut [u8]) -> usize {
             } else {
                 buf.len()
             };
-            file.inode.ops.write(file.inode.clone(), *pos, buf);
+            file.inode.ops.write(&file.inode, *pos, buf);
             *pos += val_to_add;
         }
 
@@ -200,10 +232,10 @@ pub fn write(fd: Fd, buf: &mut [u8]) -> usize {
     })
 }
 
-pub fn read(fd: Fd, buf: &mut [u8]) -> usize {
+pub fn sys_read(fd: Fd, buf: &mut [u8]) -> usize {
     with_curr_proc(|p| {
         let file = p.fd.get(fd as usize).unwrap().clone();
-        file.inode.ops.read(file.inode.clone(), buf);
+        file.inode.ops.read(&file.inode, *file.pos.lock(), buf);
 
         let mut pos = file.pos.lock();
         let size = file.inode.meta.lock().size;
@@ -217,7 +249,19 @@ pub fn read(fd: Fd, buf: &mut [u8]) -> usize {
     })
 }
 
-pub fn open(path: &str, flag: OpenFlag) -> Option<Fd> {
+pub struct GenericFileOps;
+
+impl FileOps for GenericFileOps {
+    fn read(&self, file: &File, buffer: &mut [u8]) {
+        file.inode.ops.read(&file.inode, *file.pos.lock(), buffer);
+    }
+
+    fn write(&self, file: &File, buffer: &[u8]) {
+        file.inode.ops.write(&file.inode, *file.pos.lock(), buffer);
+    }
+}
+
+pub fn sys_open(path: &str, flag: OpenFlag) -> Option<Fd> {
     let mp = find_mountpoint(path);
     // "/mnt/dir/file" -> "/dir/file"
     let mp_root_path = &mp.mountpoint.read().name;
@@ -227,12 +271,13 @@ pub fn open(path: &str, flag: OpenFlag) -> Option<Fd> {
         path.strip_prefix(mp_root_path).unwrap()
     };
     let mp_root = mp.root.read();
-    let inode = mp_root.inode.ops.lookup(mp_root.inode.clone(), rel_path);
+    let inode = mp_root.inode.ops.lookup(&mp_root.inode, rel_path);
     if let Some(inode) = inode {
         let file = Arc::new(File {
             inode: Arc::new(inode),
             pos: Mutex::new(0),
             flag,
+            ops: Arc::new(GenericFileOps),
         });
 
         let fd = with_curr_proc_mut(|p| {
@@ -248,7 +293,7 @@ pub fn open(path: &str, flag: OpenFlag) -> Option<Fd> {
 }
 
 // for now, all close does is delete File from PCB
-pub fn close(fd: Fd) {
+pub fn sys_close(fd: Fd) {
     with_curr_proc_mut(|p| {
         p.fd.remove(fd as usize);
     });
@@ -319,18 +364,4 @@ pub fn init_vfs() {
     mount_initramfs(&mut table, "/init");
 
     MOUNT_TABLE.init_once(|| table);
-}
-
-// Device Nodes
-
-enum DeviceNode {
-    Tty,
-    Console,
-}
-
-#[repr(u64)]
-enum StdFd {
-    Stdin,
-    Stderr,
-    Stdout,
 }

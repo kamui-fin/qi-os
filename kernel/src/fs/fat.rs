@@ -10,16 +10,16 @@
 
 use core::mem;
 
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::{slice, vec};
-use bitflags::bitflags;
+use alloc::{format, slice, vec};
+use bitflags::{bitflags, Flags};
 use spin::Mutex;
 use x86_64::align_down;
 
 use crate::driver::cmos::get_unix_time;
-use crate::fs::vfs::{FsOperations, INode, NodeType, SuperBlock};
-use crate::interrupts::{BOOT_RTC, ELAPSED};
+use crate::fs::vfs::{DEntry, DEntryMinimal, INode, INodeData, INodeOps, NodeType, SuperBlock};
 use crate::{driver::ata::AtaError, serial_println};
 
 use super::vfs;
@@ -157,6 +157,13 @@ impl DirEntry {
 
     fn is_dot(&self) -> bool {
         self.name == DOT || self.name == DOT_DOT
+    }
+
+    pub fn name_as_str(&self) -> String {
+        let name = str::from_utf8(&self.name).unwrap().trim();
+        let ext = str::from_utf8(&self.ext).unwrap().trim();
+
+        format!("{name}.{ext}")
     }
 }
 
@@ -329,32 +336,13 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         target_bytes.len() == actual_fat_len && target_bytes == &bytes[0..actual_fat_len]
     }
 
-    pub fn find_file(&self, path: &str) -> Option<DirEntryWithLoc> {
-        let mut parts = path.split("/").skip(1).peekable();
-        let mut dir_list = self
-            .read_dir_from_cluster(self.bpb.root_cluster)
-            .into_iter();
-        let mut next_segment = parts.next();
-        while let Some(segment) = next_segment {
-            let Some(dir) = dir_list.next() else { break };
-            if self.compare_dirent(segment, &dir.entry) {
-                if parts.peek().is_none() {
-                    return Some(dir);
-                } else {
-                    if !dir.entry.attr.contains(DirEntryFlags::FAT_ATTR_DIRECTORY) {
-                        continue;
-                    }
-                    // dir match, move to next
-                    let cluster = (dir.entry.first_cluster_high as u32) << 16
-                        | (dir.entry.first_cluster_low as u32);
-
-                    dir_list = self.read_dir_from_cluster(cluster).into_iter();
-
-                    next_segment = parts.next();
-                }
+    pub fn find(&self, parent_cluster: u32, name: &str) -> Option<DirEntryWithLoc> {
+        let dir_list = self.read_dir_from_cluster(parent_cluster).into_iter();
+        for dir in dir_list {
+            if self.compare_dirent(name, &dir.entry) {
+                return Some(dir);
             }
         }
-
         None
     }
 
@@ -381,7 +369,7 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
                 if first_byte == 0xE5u8 {
                     continue;
                 }
-                let dir = unsafe { (core::ptr::read_unaligned(bytes.as_ptr() as *const DirEntry)) };
+                let dir = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const DirEntry) };
                 let dir_with_loc = DirEntryWithLoc {
                     entry: dir,
                     loc: ClusterOffset {
@@ -562,7 +550,7 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         }
     }
 
-    pub fn write_buffer(&self, dir: &mut DirEntryWithLoc, offset: usize, buffer: &[u8]) {
+    pub fn write_buffer(&self, dir: &mut DirEntryWithLoc, offset: usize, buffer: &[u8]) -> usize {
         let cluster_bytes = self.bpb.sectors_per_cluster as usize * 512;
 
         let required_size = offset + buffer.len();
@@ -572,8 +560,6 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
 
         let cluster_index = offset / cluster_bytes;
         let cluster_offset = offset % cluster_bytes;
-
-        serial_println!("CURR ({curr_num_clusters}) REQUIRED {required_clusters} --- {cluster_index} {cluster_offset}");
 
         // walk the chain up until start of cluster_index
         let mut curr = dir.entry.first_cluster();
@@ -589,8 +575,6 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
             //  -> extend if needed
             let new_clusters = required_clusters - curr_num_clusters;
             let first_new = self.alloc_clusters(new_clusters).unwrap();
-
-            serial_println!("Allocated {new_clusters} new clusters. First new = {first_new:x}");
 
             // only if NOT new file (contains some cluster atleast)
             if prev != 0 {
@@ -621,24 +605,27 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
             i += 1;
         }
 
+        let mut bytes_written = 0;
+
         // write into cluster at offset, and iterate through
         // first cluster, we can only write first cluster_bytes - cluster_offset bytes of buffer
         let mut i = core::cmp::min(cluster_bytes - cluster_offset, buffer.len());
         self.write_cluster(curr, cluster_offset, &buffer[0..i]);
+        bytes_written += i + 1;
         while i < buffer.len() {
             curr = self.get_next_cluster(curr);
-            self.write_cluster(
-                curr,
-                0,
-                &buffer[i..core::cmp::min(i + cluster_bytes, buffer.len())],
-            );
+            let data = &buffer[i..core::cmp::min(i + cluster_bytes, buffer.len())];
+            self.write_cluster(curr, 0, data);
             i += cluster_bytes;
+            bytes_written += data.len();
         }
 
         if required_size > dir.entry.file_size as usize {
             dir.entry.file_size = required_size as u32;
             self.update_dir(dir);
         }
+
+        bytes_written
     }
 
     fn update_dir(&self, dirloc: &DirEntryWithLoc) {
@@ -680,11 +667,7 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         free_position
     }
 
-    pub fn create_dir(&self, path: &str) {
-        let (parent, child) = path.rsplit_once("/").unwrap();
-        // find parent direntry
-        let parent_direntry = self.find_file(parent).unwrap();
-
+    pub fn create_dir(&self, parent_direntry: &DirEntryWithLoc, dir_name: &str) {
         // TODO: handle directory full
         let free_position = self
             .get_free_dirent_pos(parent_direntry.entry.first_cluster())
@@ -692,7 +675,7 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
 
         let mut name: [u8; 8] = [0x20; 8];
         let ext: [u8; 3] = [0x20; 3];
-        for (i, c) in child.chars().take(8).enumerate() {
+        for (i, c) in dir_name.chars().take(8).enumerate() {
             name[i] = c.to_ascii_uppercase() as u8;
         }
 
@@ -787,24 +770,13 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         self.update_dir(&new_dir_with_loc);
     }
 
-    pub fn create_file(&self, path: &str) {
-        if self.find_file(path).is_some() {
-            return;
-        }
-
-        let (parent, child) = path.rsplit_once("/").unwrap();
-
-        // find parent direntry
-        let parent_direntry = self.find_file(parent).unwrap();
-
+    pub fn create_file(&self, parent_cluster: u32, name: &str) {
         //  -> find empty 32 byte spot in parent dir
-        let free_position = self
-            .get_free_dirent_pos(parent_direntry.entry.first_cluster())
-            .unwrap();
+        let free_position = self.get_free_dirent_pos(parent_cluster).unwrap();
 
-        let (name_str, ext_str) = match child.rsplit_once(".") {
+        let (name_str, ext_str) = match name.rsplit_once(".") {
             Some((n, e)) => (n, e),
-            None => (child, ""),
+            None => (name, ""),
         };
         let mut name: [u8; 8] = [0x20; 8];
         let mut ext: [u8; 3] = [0x20; 3];
@@ -839,13 +811,10 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         self.update_dir(&new_dir_with_loc);
     }
 
-    pub fn mv(&self, path: &str, to: &str) {
-        let mut dirent = self.find_file(path).unwrap();
-
-        let (_, child) = to.rsplit_once("/").unwrap();
-        let (name_str, ext_str) = match child.rsplit_once(".") {
+    pub fn mv(&self, dirent: &mut DirEntryWithLoc, to: &str) {
+        let (name_str, ext_str) = match to.rsplit_once(".") {
             Some((n, e)) => (n, e),
-            None => (child, ""),
+            None => (to, ""),
         };
         let mut name: [u8; 8] = [0x20; 8];
         let mut ext: [u8; 3] = [0x20; 3];
@@ -862,18 +831,13 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         self.update_dir(&dirent);
     }
 
-    pub fn delete_file(&self, path: &str) {
-        let mut dirent = self.find_file(path).unwrap();
+    pub fn delete_file(&self, dirent: &mut DirEntryWithLoc) {
         dirent.entry.name[0] = 0xE5;
         self.free_clusters(dirent.entry.first_cluster());
         self.update_dir(&dirent);
     }
 
-    pub fn delete_dir(&self, path: &str) {
-        /*
-        Recursive Check: The OS ensures there are no active files or subdirectories inside (ignoring . and ..).
-        */
-        let mut dirent = self.find_file(path).unwrap();
+    pub fn delete_dir(&self, dirent: &mut DirEntryWithLoc) {
         let children = self.read_dir_from_cluster(dirent.entry.first_cluster());
 
         let mut is_safe_to_del = true;
@@ -892,18 +856,19 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
 
     pub fn get_root_inode(
         &self,
-        ops: Arc<dyn FsOperations>,
+        ops: Arc<dyn INodeOps>,
         superblock: Arc<SuperBlock>,
     ) -> alloc::sync::Arc<INode> {
-        let dirent = self.find_file("/").unwrap().entry;
+        let dirent = self.get_dir_entry(self.bpb.root_cluster as u64);
         Arc::new(INode {
-            inum: dirent.first_cluster() as u64,
+            inum: dirent.entry.first_cluster() as u64,
             fs: superblock,
-            meta: Mutex::new(vfs::INodeMetadata {
-                size: dirent.file_size as usize,
+            meta: Mutex::new(vfs::FsMetadata {
+                size: dirent.entry.file_size as usize,
                 mtime: 0,
             }),
             mode: vfs::NodeType::Directory,
+            data: INodeData::FatFs(Mutex::new(dirent)),
             ops,
         })
     }
@@ -932,8 +897,8 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
     }
 }
 
-impl<'a, D: BlockDevice + Sync + Send> FsOperations for Fat32<'a, D> {
-    fn lookup(&self, parent: Arc<INode>, path: &str) -> Option<INode> {
+impl<'a, D: BlockDevice + Sync + Send> INodeOps for Fat32<'a, D> {
+    fn lookup(&self, parent: &INode, name: &str) -> Option<INode> {
         let to_inode = |d: DirEntryWithLoc| {
             let bytes_per_cluster = (self.bpb.sectors_per_cluster as usize) * 512;
             let data_start_bytes = self.data_start as u64 * 512;
@@ -951,52 +916,82 @@ impl<'a, D: BlockDevice + Sync + Send> FsOperations for Fat32<'a, D> {
             INode {
                 inum,
                 fs: parent.fs.clone(),
-                meta: Mutex::new(vfs::INodeMetadata {
+                meta: Mutex::new(vfs::FsMetadata {
                     size: d.entry.file_size as usize,
                     mtime: 0,
                 }),
                 mode,
                 ops: parent.ops.clone(),
+                data: vfs::INodeData::FatFs(Mutex::new(d)),
             }
         };
 
-        let dir = self.find_file(path);
+        let dir = self.find(parent.inum as u32, name);
         dir.map(|d| to_inode(d))
     }
 
-    fn read(&self, node: Arc<INode>, buffer: &mut [u8]) {
-        let dir = self.get_dir_entry(node.inum);
-        self.read_buffer(&dir, buffer);
+    fn read(&self, node: &INode, offset: usize, buf: &mut [u8]) -> usize {
+        let INodeData::FatFs(data) = &node.data else {
+            panic!("fat32 driver received non-FAT inode {}!", node.inum);
+        };
+
+        self.read_buffer(&data.lock(), buf)
     }
 
-    fn write(&self, node: Arc<INode>, offset: usize, buffer: &[u8]) {
-        let mut dir = self.get_dir_entry(node.inum);
-        self.write_buffer(&mut dir, offset, buffer)
+    fn write(&self, node: &INode, offset: usize, buf: &[u8]) -> usize {
+        let INodeData::FatFs(data) = &node.data else {
+            panic!("fat32 driver received non-FAT inode {}!", node.inum);
+        };
+        self.write_buffer(&mut data.lock(), offset, buf)
     }
 
-    fn append(&self, node: Arc<INode>, buffer: &[u8]) {
-        let mut dir = self.get_dir_entry(node.inum);
-        let size = dir.entry.file_size;
-        self.write_buffer(&mut dir, size as usize, buffer)
+    fn create_file(&self, dir: &INode, name: &str) {
+        self.create_file(dir.inum as u32, name);
     }
 
-    fn touch(&self, path: &str) {
-        self.create_file(path);
+    fn rename(&self, node: &INode, to: &str) {
+        let INodeData::FatFs(data) = &node.data else {
+            panic!("fat32 driver received non-FAT inode {}!", node.inum);
+        };
+        self.mv(&mut data.lock(), to);
     }
 
-    fn rename(&self, path: &str, to: &str) {
-        self.mv(path, to);
+    fn delete_file(&self, file: &INode) {
+        let INodeData::FatFs(data) = &file.data else {
+            panic!("fat32 driver received non-FAT inode {}!", file.inum);
+        };
+        self.delete_file(&mut data.lock());
     }
 
-    fn mkdir(&self, path: &str) {
-        self.create_dir(path);
+    fn mkdir(&self, dir: &INode, name: &str) {
+        let INodeData::FatFs(data) = &dir.data else {
+            panic!("fat32 driver received non-FAT inode {}!", dir.inum);
+        };
+        self.create_dir(&data.lock(), name);
     }
 
-    fn rmdir(&self, path: &str) {
-        self.delete_dir(path);
+    fn rmdir(&self, dir: &INode) {
+        let INodeData::FatFs(data) = &dir.data else {
+            panic!("fat32 driver received non-FAT inode {}!", dir.inum);
+        };
+        self.delete_dir(&mut data.lock());
     }
 
-    fn delete(&self, path: &str) {
-        self.delete_file(path);
+    fn readdir(&self, dir: &INode) -> Vec<DEntryMinimal> {
+        let attr_to_node_type =
+            |attr: DirEntryFlags| match attr.contains(DirEntryFlags::FAT_ATTR_DIRECTORY) {
+                true => NodeType::Directory,
+                false => NodeType::File,
+            };
+        let entries = self.read_dir_from_cluster(dir.inum as u32);
+        entries
+            .iter()
+            .map(|e| DEntryMinimal {
+                name: e.entry.name_as_str(),
+                inum: e.entry.first_cluster(),
+                size: e.entry.file_size as usize,
+                filetype: attr_to_node_type(e.entry.attr),
+            })
+            .collect()
     }
 }
