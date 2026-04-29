@@ -108,7 +108,7 @@ impl Board {
         self.full_move
     }
 
-    pub(crate) fn is_legal_move(&self, m: Move, player_color: Color) -> bool {
+    pub fn is_legal_move(&self, m: Move, player_color: Color) -> bool {
         match m {
             Move::Piece(from, to) => match self.get_piece(from) {
                 Some(piece) => {

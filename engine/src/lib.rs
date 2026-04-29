@@ -20,9 +20,7 @@ pub enum GameResult {
     
     Victory(Color),
     
-    Draw,
-
-    Stalemate,
+    //Draw,
     
     IllegalMove(Move),
 }
