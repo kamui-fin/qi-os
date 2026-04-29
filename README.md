@@ -16,15 +16,20 @@ _**The beginning of something big.**_
 
     [ ] Insufficient material ruling for draws
 
+    [ ] add draw as game result in lib
+
 ## Engine
     
 ### Piece value tracking
+...
 ### move gen
+...
 ### move tree
+...
 ### alpha beta
-
+...
 ## Convert from array to bitboard based logic
-
+...
 
 
     
