@@ -1,13 +1,16 @@
 mod transparent;
+
 use transparent::TransparentDrawTarget;
 use embedded_graphics::{
     image::Image, 
     pixelcolor::Rgb888, 
     prelude::*
 };
-use embedded_graphics_simulator::{OutputSettingsBuilder, SimulatorDisplay, Window};
+use embedded_graphics_simulator::{
+    OutputSettings, SimulatorDisplay, SimulatorEvent, Window, 
+};
 use engine::{
-    Color, board::Board, piece::{Piece, PieceType}, position::Position
+    Color, GameResult, Move, board::Board, piece::{Piece, PieceType}, position::Position
 };
 use tinytga::Tga;
 
@@ -58,22 +61,16 @@ pub fn get_img(piece: Piece) -> &'static [u8]{
         }
     }
 
-fn main() -> Result<(), core::convert::Infallible> {
-    let mut display: SimulatorDisplay<Rgb888> = SimulatorDisplay::new(Size::new(1280, 1024));
-    let tga1: Tga<Rgb888> = Tga::from_slice(include_bytes!("assets/board.tga")).unwrap();
-    let game_board = Image::new(&tga1, Point::new(0, 0));
-        game_board.draw(&mut display)?;
-
-    let board = Board::default();
+fn drawboard(board: Board, display: &mut SimulatorDisplay<Rgb888>, window: &mut Window){
     let mut filter = TransparentDrawTarget {
-        target: &mut display,
+        target: display,
         transparent_color: Rgb888::BLACK,
     };
     
     let mut r:i32 = 0;
     let mut c:i32 = 0;
     while r < 10 {
-        while c < 9 {
+        while c < 9 { 
             let piece = board.get_piece(Position::new(r.try_into().unwrap(), c.try_into().unwrap()));
             match piece {
                 Some(piece) => {
@@ -90,9 +87,58 @@ fn main() -> Result<(), core::convert::Infallible> {
         c = 0;
         r +=1;
     }
+    window.update(&display);
+}
+fn main() -> Result<(), core::convert::Infallible> {
+    let mut display: SimulatorDisplay<Rgb888> = SimulatorDisplay::new(Size::new(1280, 1024));
+    let mut window = Window::new("Xiangqi", &OutputSettings::default());
+    let tga1: Tga<Rgb888> = Tga::from_slice(include_bytes!("assets/board.tga")).unwrap();
+    let game_board = Image::new(&tga1, Point::new(0, 0));
+        game_board.draw(&mut display);
+
+    let mut board = Board::default();
+    drawboard(board, &mut display,&mut window);
+    let mut selected: Option<Piece> = None;
+    //let mut piece_moved = false;
     
-    let output_settings = OutputSettingsBuilder::new().build();
-    Window::new("Xiangqi", &output_settings).show_static(&display);
+    'Game: loop {
+        for event in window.events() {
+            match event {
+                SimulatorEvent::Quit => break 'Game,
+                
+                SimulatorEvent::MouseButtonUp { point, .. } => {
+                    if !(12 <= point.x) || !(point.x <= 821)
+                    || !(12 <= point.y) || !(point.y <= 911) {
+                        continue 'Game
+                    }
+                    let col:i8 = ((point.x - 12) / 90).try_into().unwrap();
+                    let row:i8 = ((911 - point.y) / 90).try_into().unwrap();
+                    let new_pos = Position::new(row, col);
+
+                    match selected {
+                        
+                        Some(piece) => {
+                            let m = Move::Piece(piece.pos, new_pos);
+                            let result = board.play_move(m);
+                            match result {
+                                GameResult::Continuing(next_turn) => {board = next_turn}
+                                GameResult::IllegalMove(_m) => {continue 'Game}
+                                GameResult::Victory(_color) => {break 'Game}
+                            }
+                        }
+                        None => {
+                            if board.has_ally_piece(new_pos, board.get_turn_color()){
+                                selected = Some(board.get_piece(new_pos).unwrap())
+                            } else {continue 'Game}
+                            
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        drawboard(board, &mut display, &mut window)
+    }
 
     Ok(())
 }
