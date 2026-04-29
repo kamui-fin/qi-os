@@ -145,7 +145,7 @@ impl Piece {
 
     pub fn is_legal_move(&self, new_pos: Position, board: &Board) -> bool {
         // rule these out first as postion helpers don't check for legality
-        if board.has_ally_piece(new_pos, self.color) || new_pos.is_off_board(){
+        if new_pos.is_off_board() ||board.has_ally_piece(new_pos, self.color){
             return false
         }
 
