@@ -24,6 +24,7 @@ pub mod fs;
 pub mod graphics;
 pub mod interrupts;
 pub mod mem;
+pub mod syscall;
 pub mod task;
 
 pub static BOOT_INFO: OnceCell<Mutex<BootInfo>> = OnceCell::uninit();

@@ -17,6 +17,7 @@ use crate::print;
 use crate::println;
 use crate::serial_print;
 use crate::serial_println;
+use crate::syscall::syscall_entry;
 use crate::task::lock::NEEDS_RESCHEDULE;
 use crate::task::proc::ProcessControlBlock;
 use crate::task::proc::ECHO_ELF;
@@ -29,27 +30,13 @@ use crate::task::thread::ThreadControlBlock;
 use crate::task::thread::ThreadState;
 use crate::task::thread::CURR_THREAD_PTR;
 use crate::task::thread::SCHEDULER;
-use crate::BOOT_INFO;
-use crate::PROC;
-use crate::SCREEN;
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use common::UserWindow;
 use conquer_once::spin::OnceCell;
-use futures_util::stream::select_with_strategy;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
-use x86_64::structures::paging::FrameAllocator;
-use x86_64::structures::paging::Mapper;
-use x86_64::structures::paging::OffsetPageTable;
-use x86_64::structures::paging::Page;
-use x86_64::structures::paging::PageTableFlags;
-use x86_64::structures::paging::Size4KiB;
-use x86_64::structures::port::PortRead;
 use x86_64::VirtAddr;
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -57,6 +44,29 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+pub static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
+pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
+pub const TIME_SLICE: usize = 100 * 1_000_000;
+pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum InterruptIndex {
+    Timer = PIC_1_OFFSET,
+    Keyboard,
+    PS2 = PIC_1_OFFSET + 12,
+}
+
+impl InterruptIndex {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn as_usize(self) -> usize {
+        usize::from(self.as_u8())
+    }
+}
 
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
@@ -83,373 +93,6 @@ lazy_static! {
     };
 }
 
-/*
-* XV6 has:
-    *** SYS_fork    1
-    *** SYS_exit    2
-    *** SYS_read    5
-    *** SYS_kill    6
-    *** SYS_fstat   8
-    *** SYS_chdir   9
-    *** SYS_getpid 11
-    *** SYS_sbrk   12
-    *** SYS_pause  13
-    *** SYS_uptime 14
-    *** SYS_open   15
-    *** SYS_write  16
-    *** SYS_mkdir  20
-    *** SYS_close  21
-    *** SYS_dup    10
-    *** SYS_mknod  17
-    *** SYS_pipe    4
-    SYS_fork    22
-    SYS_exec    7
-    SYS_wait    3
-*/
-
-#[derive(Debug)]
-enum SysCallKind {
-    Open,
-    Close,
-
-    Chdir,
-    Mkdir,
-    Rmdir,
-    Listdir,
-
-    Fstat,
-    Touch,
-    Delete,
-    Rename,
-
-    Read,
-    Write, // fd, buf, len
-
-    Dup,
-    Mknode,
-    Pipe,
-
-    // ---
-    Exit,  // status
-    Spawn, // path, argv
-    Wait,  // pid
-    Alloc, // size
-    GetPid,
-    AllocBackBuffer,
-    GraphicsFrameReady,
-    Sleep,
-    GetUnixTime,
-}
-
-impl From<usize> for SysCallKind {
-    fn from(value: usize) -> Self {
-        match value {
-            0x0 => Self::Write,
-            0x1 => Self::Exit,
-            0x2 => Self::Spawn,
-            0x3 => Self::Wait,
-            0x4 => Self::Alloc,
-            0x5 => Self::GetPid,
-            0x6 => Self::AllocBackBuffer,
-            0x7 => Self::GraphicsFrameReady,
-            0x8 => Self::Sleep,
-            0x9 => Self::GetUnixTime,
-            _ => panic!("unknown syscall"),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-struct TrapFrame {
-    r15: usize,
-    r14: usize,
-    r13: usize,
-    r12: usize,
-    r11: usize,
-    r10: usize,
-    r9: usize,
-    r8: usize,
-    rbp: usize,
-    rdi: usize,
-    rsi: usize,
-    rdx: usize,
-    rcx: usize,
-    rbx: usize,
-    rax: usize,
-}
-
-#[unsafe(naked)]
-pub unsafe extern "C" fn syscall_entry() {
-    naked_asm!(
-        r#"
-            push RAX
-            push RBX
-            push RCX
-            push RDX
-            push RSI
-            push RDI
-            push RBP
-            push R8
-            push R9
-            push R10
-            push R11
-            push R12
-            push R13
-            push R14
-            push R15
-
-            mov rdi, rsp
-            call {}
-
-            pop R15
-            pop R14
-            pop R13
-            pop R12
-            pop R11
-            pop R10
-            pop R9
-            pop R8
-            pop RBP
-            pop RDI
-            pop RSI
-            pop RDX
-            pop RCX
-            pop RBX
-            pop RAX
-
-            iretq
-        "#,
-        sym syscall_handler
-    );
-}
-
-extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
-    let kind = SysCallKind::from(trap_frame.rax);
-    let arg1 = trap_frame.rdi;
-    let arg2 = trap_frame.rsi;
-    let arg3 = trap_frame.rdx;
-    let arg4 = trap_frame.r10;
-    let arg5 = trap_frame.r8;
-    let arg6 = trap_frame.r9;
-    // serial_println!("{:#?} {arg1:x} {arg2:x}", kind);
-    match kind {
-        SysCallKind::Write => {
-            // arg1: *const str
-            // arg2: length
-            let slice_ptr: *const [u8] = ptr::slice_from_raw_parts(arg1 as *const u8, arg2);
-            let str_ptr: *const str = slice_ptr as *const str;
-            let str = unsafe { &*str_ptr };
-
-            serial_print!("{str}");
-        }
-        SysCallKind::Exit => {
-            // arg1: status
-            let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-            {
-                let mut procs = PROC.get().unwrap().lock();
-                let curr_proc_index = procs
-                    .iter()
-                    .position(|p| p.tcb.lock().id == curr_thread_id)
-                    .unwrap();
-                procs.remove(curr_proc_index);
-            }
-            serial_println!("Exiting {curr_thread_id} with status {arg1}");
-            terminate_task(arg1 as u8);
-        }
-        SysCallKind::Spawn => {
-            // arg1: *const c_str
-            // arg2: argc
-            // arg3: argv
-            let prgrm_name = unsafe { CStr::from_ptr(arg1 as *const i8) };
-            spawn_proc(prgrm_name, arg3 as *const *const c_char, arg2);
-        }
-        SysCallKind::GetPid => {
-            let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-            let procs = PROC.get().unwrap().lock();
-            let curr_proc = procs
-                .iter()
-                .find(|p| p.tcb.lock().id == curr_thread_id)
-                .unwrap();
-            trap_frame.rax = curr_proc.pid as usize;
-        }
-        SysCallKind::Wait => {
-            // block/sleep until process exits?
-            // more useful when we build a shell
-            unimplemented!()
-        }
-        SysCallKind::AllocBackBuffer => {
-            // get the length of LFB and allocate needed frames, zero out, map into userspace
-
-            // This is the starting virt addr within user proc that we'll map any shm into
-            const MMAP_BASE: usize = 0x0000_4000_0000_0000;
-
-            let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-            let mut procs = PROC.get().unwrap().lock();
-            let curr_proc = procs
-                .iter_mut()
-                .find(|p| p.tcb.lock().id == curr_thread_id)
-                .unwrap();
-
-            let mut boot_info = BOOT_INFO.get().unwrap().lock();
-            let screen = SCREEN.get().unwrap().lock();
-            // not seeing any prints after here???
-            let mut mapper = unsafe {
-                OffsetPageTable::new(
-                    curr_proc.page_table,
-                    VirtAddr::new(boot_info.physical_memory_offset),
-                )
-            };
-            let buffer_num_bytes = screen.bytes_per_line * screen.height;
-
-            let num_frames = buffer_num_bytes.div_ceil(4096);
-            // that's how many pages we'll have
-            let start_page = Page::containing_address(VirtAddr::new(MMAP_BASE as u64));
-            let end_page = start_page + num_frames as u64;
-
-            let mut backbuffer_frames = Vec::new();
-            for page in Page::range(start_page, end_page) {
-                let frame = boot_info
-                    .allocator
-                    .allocate_frame()
-                    .expect("proc_init: out of mem");
-
-                backbuffer_frames.push(frame);
-
-                let frame_ptr: *mut u8 = VirtAddr::new(
-                    frame.start_address().as_u64() + boot_info.physical_memory_offset,
-                )
-                .as_mut_ptr();
-                // clear frame
-                unsafe {
-                    core::ptr::write_bytes(frame_ptr, 0, 4096);
-                }
-                let mapper_flush = unsafe {
-                    mapper
-                        .map_to(
-                            page,
-                            frame,
-                            PageTableFlags::WRITABLE
-                                | PageTableFlags::PRESENT
-                                | PageTableFlags::USER_ACCESSIBLE,
-                            &mut boot_info.allocator,
-                        )
-                        .expect("(fixed offset mapping): unable to map frame")
-                };
-                mapper_flush.flush();
-            }
-
-            curr_proc.backbuffer_frames = Some(backbuffer_frames);
-
-            // Fill in user passed in FrameBufferInfo struct
-            let user_window_info = unsafe { &mut *(arg1 as *mut UserWindow) };
-            user_window_info.base_addr = MMAP_BASE as u64;
-            user_window_info.width = screen.width;
-            user_window_info.height = screen.height;
-            user_window_info.bytes_per_pixel = screen.bytes_per_pixel;
-            user_window_info.bytes_per_line = screen.bytes_per_line;
-        }
-        SysCallKind::GraphicsFrameReady => {
-            // we notify compositor that we are ready for a paint
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.unblock_task(3);
-        }
-        SysCallKind::Sleep => {
-            // arg1: ms
-            nano_sleep((arg1 * 1_000_000) as u64);
-        }
-        SysCallKind::Alloc => {
-            let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
-            // arg1: size
-            let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-            let mut procs = PROC.get().unwrap().lock();
-            let curr_proc = procs
-                .iter_mut()
-                .find(|p| p.tcb.lock().id == curr_thread_id)
-                .unwrap();
-
-            let old_heap_end = curr_proc.heap_end;
-            let new_heap_end = old_heap_end + arg1;
-
-            let old_mapped_end = old_heap_end.align_up(4096u64);
-            let new_mapped_end = new_heap_end.align_up(4096u64);
-
-            if new_mapped_end > old_mapped_end {
-                let start_page = Page::<Size4KiB>::containing_address(old_mapped_end);
-                let end_page = Page::<Size4KiB>::containing_address(new_mapped_end - 1u64);
-
-                let mut mapper = unsafe {
-                    OffsetPageTable::new(
-                        curr_proc.page_table,
-                        VirtAddr::new(boot_info.physical_memory_offset),
-                    )
-                };
-                // map pages in-between
-                for page in Page::range_inclusive(start_page, end_page) {
-                    let frame = boot_info
-                        .allocator
-                        .allocate_frame()
-                        .expect("proc_init: out of mem");
-                    let frame_ptr: *mut u8 = VirtAddr::new(
-                        frame.start_address().as_u64() + boot_info.physical_memory_offset,
-                    )
-                    .as_mut_ptr();
-                    // clear frame
-                    unsafe {
-                        core::ptr::write_bytes(frame_ptr, 0, 4096);
-                    }
-
-                    let mapper_flush = unsafe {
-                        mapper
-                            .map_to(
-                                page,
-                                frame,
-                                PageTableFlags::WRITABLE
-                                    | PageTableFlags::PRESENT
-                                    | PageTableFlags::USER_ACCESSIBLE,
-                                &mut boot_info.allocator,
-                            )
-                            .expect("(fixed offset mapping): unable to map frame")
-                    };
-                    mapper_flush.flush();
-                }
-            }
-
-            curr_proc.heap_end = new_heap_end;
-            trap_frame.rax = old_heap_end.as_u64() as usize;
-        }
-        SysCallKind::GetUnixTime => {
-            let elapsed_sec = ELAPSED
-                .load(core::sync::atomic::Ordering::Relaxed)
-                .div_ceil(1000) as usize;
-            let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
-            serial_println!("{}", boot_unix + elapsed_sec);
-            trap_frame.rax = boot_unix + elapsed_sec;
-        }
-    }
-}
-
-pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char, argc: usize) {
-    let binary = match program.to_str().unwrap() {
-        "echo" => ECHO_ELF,
-        "xiangqi" => XIANGQI_ELF,
-        _ => {
-            panic!("unrecognized program")
-        }
-    };
-    let proc = ProcessControlBlock::from_bytes(binary, argv, argc, program, get_root_dentry());
-    let id = proc.tcb.lock().id;
-    let tcb_clone = proc.tcb.clone();
-
-    serial_println!("{}", proc.tcb.lock().id);
-
-    PROC.get().unwrap().lock().push(proc);
-
-    let mut scheduler = SCHEDULER.lock();
-    scheduler.threads.push(tcb_clone);
-    scheduler.ready_queue.push_back(id);
-}
-
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     panic!(
         "EXCEPTION: GENERAL PROTECTION FAULT\nError Code: {:#x}\n{:#?}",
@@ -467,29 +110,6 @@ extern "x86-interrupt" fn double_fault_handler(
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
-
-#[derive(Debug, Clone, Copy)]
-#[repr(u8)]
-pub enum InterruptIndex {
-    Timer = PIC_1_OFFSET,
-    Keyboard,
-    PS2 = PIC_1_OFFSET + 12,
-}
-
-impl InterruptIndex {
-    fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn as_usize(self) -> usize {
-        usize::from(self.as_u8())
-    }
-}
-
-pub static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
-pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
-pub const TIME_SLICE: usize = 100 * 1_000_000;
-pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     if !BOOT_RTC.is_initialized() {

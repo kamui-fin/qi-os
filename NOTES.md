@@ -5,6 +5,7 @@
     - Pipes
     - /tmp 
     - /proc
+- Environment variables
 - Stack smash protector
 - Unit + Integraiton testing setup
 - TTY:

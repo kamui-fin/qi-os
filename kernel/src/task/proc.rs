@@ -25,8 +25,8 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::fs::vfs::{DEntry, File};
-use crate::task::thread::CURR_THREAD_PTR;
+use crate::fs::vfs::{get_root_dentry, DEntry, File};
+use crate::task::thread::{CURR_THREAD_PTR, SCHEDULER};
 use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
 use crate::{serial_println, BOOT_INFO, PROC};
 
@@ -391,4 +391,25 @@ where
         .unwrap();
 
     f(curr_proc)
+}
+
+pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char, argc: usize) {
+    let binary = match program.to_str().unwrap() {
+        "echo" => ECHO_ELF,
+        "xiangqi" => XIANGQI_ELF,
+        _ => {
+            panic!("unrecognized program")
+        }
+    };
+    let proc = ProcessControlBlock::from_bytes(binary, argv, argc, program, get_root_dentry());
+    let id = proc.tcb.lock().id;
+    let tcb_clone = proc.tcb.clone();
+
+    serial_println!("{}", proc.tcb.lock().id);
+
+    PROC.get().unwrap().lock().push(proc);
+
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.threads.push(tcb_clone);
+    scheduler.ready_queue.push_back(id);
 }

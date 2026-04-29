@@ -29,7 +29,6 @@ use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
 use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
-use kernel::interrupts::spawn_proc;
 use kernel::mem::allocator::init_heap;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::task::executor::Executor;

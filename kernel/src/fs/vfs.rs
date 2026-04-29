@@ -1,11 +1,14 @@
 use core::any::Any;
+use core::ffi::CStr;
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::ffi::c_str;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use bitfield_struct::bitfield;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use spin::{Mutex, RwLock};
@@ -98,10 +101,25 @@ pub struct Mount {
 
 pub type MountTable = alloc::collections::BTreeMap<String, Mount>;
 
-pub enum OpenFlag {
+#[derive(Debug, PartialEq, Eq)]
+#[repr(u64)]
+pub enum AccessMode {
     ReadOnly,
     WriteOnly,
     AppendOnly,
+}
+
+impl AccessMode {
+    const fn into_bits(self) -> u64 {
+        self as _
+    }
+    const fn from_bits(value: u64) -> Self {
+        match value {
+            0 => Self::ReadOnly,
+            1 => Self::WriteOnly,
+            _ => Self::AppendOnly,
+        }
+    }
 }
 
 #[repr(u64)]
@@ -117,7 +135,7 @@ pub struct File {
     pub inode: Arc<INode>,
 
     pub pos: Mutex<usize>,
-    pub flag: OpenFlag,
+    pub flag: AccessMode,
 
     pub ops: Arc<dyn FileOps>,
 }
@@ -155,6 +173,11 @@ fn find_mountpoint(path: &str) -> &Mount {
 
 pub fn get_root_dentry() -> Arc<RwLock<DEntry>> {
     MOUNT_TABLE.get().unwrap().get("/").unwrap().root.clone()
+}
+
+pub fn find_parent_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
+    let (parent, _) = path.rsplit_once('/').unwrap();
+    find_dentry(parent)
 }
 
 pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
@@ -200,14 +223,14 @@ pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
     Some(current)
 }
 
-pub fn sys_write(fd: Fd, buf: &mut [u8]) -> usize {
+pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
     with_curr_proc_mut(|p| {
         let file = p.fd.get_mut(fd as usize).unwrap().clone();
         let mut pos = file.pos.lock();
 
         let size = file.inode.meta.lock().size;
         let val_to_add;
-        if let OpenFlag::AppendOnly = file.flag {
+        if let AccessMode::AppendOnly = file.flag {
             val_to_add = size + buf.len();
             file.inode
                 .ops
@@ -261,7 +284,16 @@ impl FileOps for GenericFileOps {
     }
 }
 
-pub fn sys_open(path: &str, flag: OpenFlag) -> Option<Fd> {
+#[bitfield(u64)]
+pub struct OpenFlags {
+    #[bits(64)]
+    pub access_mode: AccessMode,
+}
+
+pub fn sys_open(path_addr: usize, flag: OpenFlags) -> Option<Fd> {
+    let path = unsafe { CStr::from_ptr(path_addr as *const i8) };
+    let path = path.to_str().unwrap();
+
     let mp = find_mountpoint(path);
     // "/mnt/dir/file" -> "/dir/file"
     let mp_root_path = &mp.mountpoint.read().name;
@@ -276,7 +308,7 @@ pub fn sys_open(path: &str, flag: OpenFlag) -> Option<Fd> {
         let file = Arc::new(File {
             inode: Arc::new(inode),
             pos: Mutex::new(0),
-            flag,
+            flag: flag.access_mode(),
             ops: Arc::new(GenericFileOps),
         });
 
@@ -338,7 +370,7 @@ pub fn mount_fat32(table: &mut MountTable, mount_path: &str) {
 }
 
 pub fn mount_initramfs(table: &mut MountTable, mount_path: &str) {
-    let ustar = USTAR::new(include_bytes!("../ustarfs.tar.gz"));
+    let ustar = USTAR::new(include_bytes!("../../../target/ustarfs.tar"));
     let ustar_sb = Arc::new(SuperBlock {
         fs_type: FsType::Ustar,
     });
