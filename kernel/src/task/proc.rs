@@ -50,6 +50,7 @@ pub struct ProcessControlBlock<'a> {
 }
 
 const USER_STACK_SIZE: usize = 64 * 1024;
+pub const MAX_FD: usize = 100;
 
 impl<'a> ProcessControlBlock<'a> {
     /*
@@ -360,7 +361,7 @@ impl<'a> ProcessControlBlock<'a> {
             name: program.to_str().unwrap(),
             backbuffer_frames: None,
             cwd: directory,
-            fd: Slab::with_capacity(10),
+            fd: Slab::with_capacity(MAX_FD),
         }
     }
 }

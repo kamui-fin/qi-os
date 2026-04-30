@@ -28,6 +28,7 @@ pub struct SuperBlock {
     pub fs_type: FsType,
 }
 
+#[derive(Debug)]
 pub enum NodeType {
     File,
     Directory,
@@ -153,6 +154,19 @@ pub struct Device {
 }
 
 pub static DEVICE_TABLE: OnceCell<Vec<Device>> = OnceCell::uninit();
+
+#[derive(Debug)]
+pub struct Stat {
+    dev: u64,       /* ID of device containing file */
+    ino: u64,       /* inode number */
+    mode: NodeType, /* inode type */
+    rdev: u64,      /* device ID (if special file) */
+    nlink: usize,   /* always 1 on fat32 */
+    size: usize,    /* total size, in bytes */
+    blksize: u64,   /* blocksize for file system I/O */
+    blocks: u64,    /* number of 512B blocks allocated */
+    mtime: u64,     /* time of last modification */
+}
 
 // NOTE: ensure sanitized to absolute paths before passed to VFS layer
 fn find_mountpoint(path: &str) -> &Mount {

@@ -8,13 +8,18 @@ use crate::fs::vfs::OpenFlags;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
 use crate::serial_print;
+use crate::task::proc::with_curr_proc;
 use crate::task::proc::with_curr_proc_mut;
+use crate::task::proc::MAX_FD;
 use crate::task::thread::nano_sleep;
 use crate::task::thread::terminate_task;
+use crate::task::thread::yield_sched;
 use crate::task::thread::SCHEDULER;
+use crate::UtsName;
 use crate::BOOT_INFO;
 use crate::PROC;
 use crate::SCREEN;
+use crate::UNAME;
 use alloc::vec::Vec;
 use common::UserWindow;
 use core::arch::naked_asm;
@@ -107,14 +112,6 @@ pub unsafe extern "C" fn syscall_entry() {
 //  - mmap, munmap: maps files or devices into memory (COMPLEX)
 //  - kill, sigaction, sigreturn: send signal, register signal handler
 //  - poll / select / epoll: sleep until any of a set of FDs is ready
-//  - ioctl: (fd, request, datapointer) manipulates the underlying device parameters of special files
-//  - fnctl: ioctl but manage the fd itself. e.g. set to non-blocking!
-//
-//  trivial:
-//  - lseek: move fd offset
-//  - getcwd
-//  - yield
-//  - uname
 
 #[derive(Debug)]
 enum SysCallKind {
@@ -123,9 +120,11 @@ enum SysCallKind {
 
     Read,
     Write,
+    Lseek,
 
     // dir ops
     Chdir,
+    Getcwd,
     Mkdir,
     Rmdir,
     Getdents,
@@ -137,40 +136,65 @@ enum SysCallKind {
 
     Dup,
     Dup2,
-    Mknode,
     Pipe,
 
-    Exit,
+    //  (fd, request, datapointer) manipulates the underlying device parameters of special files
+    Ioctl,
+    //  ioctl but manage the fd itself. e.g. set to non-blocking!
+    Fnctl,
+
     Spawn,
-    Wait,
+
+    Yield,
+    Exit,
     Alloc,
     GetPid,
     AllocBackBuffer,
     GraphicsFrameReady,
     Sleep,
     GetUnixTime,
+    Uname,
 }
 
 impl From<usize> for SysCallKind {
     fn from(value: usize) -> Self {
         match value {
-            0 => Self::Write,
-            1 => Self::Exit,
-            2 => Self::Spawn,
-            3 => Self::Wait,
-            4 => Self::Alloc,
-            5 => Self::GetPid,
-            6 => Self::AllocBackBuffer,
-            7 => Self::GraphicsFrameReady,
-            8 => Self::Sleep,
-            9 => Self::GetUnixTime,
-            10 => Self::Open,
-            11 => Self::Close,
-            12 => Self::Read,
-            13 => Self::Fstat,
-            14 => Self::Delete,
-            15 => Self::Rename,
-            _ => panic!("unknown syscall"),
+            0 => Self::Open,
+            1 => Self::Close,
+            2 => Self::Read,
+            3 => Self::Write,
+            4 => Self::Lseek,
+            5 => Self::Ioctl,
+            6 => Self::Fnctl,
+
+            7 => Self::Chdir,
+            8 => Self::Getcwd,
+            9 => Self::Mkdir,
+            10 => Self::Rmdir,
+            11 => Self::Getdents,
+
+            12 => Self::Fstat,
+            13 => Self::Delete,
+            14 => Self::Rename,
+
+            15 => Self::Dup,
+            16 => Self::Dup2,
+            17 => Self::Pipe,
+
+            18 => Self::Spawn,
+            19 => Self::Yield,
+            20 => Self::Exit,
+            21 => Self::GetPid,
+            22 => Self::Sleep,
+
+            23 => Self::Alloc,
+            24 => Self::AllocBackBuffer,
+            25 => Self::GraphicsFrameReady,
+
+            26 => Self::GetUnixTime,
+            27 => Self::Uname,
+
+            _ => panic!("unknown syscall number {}", value),
         }
     }
 }
@@ -248,11 +272,85 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Fstat => {
             // arg1: fd (u64)
             // arg2: *mut Stat
+            unimplemented!()
         }
         // TODO: refactor to be unlink
         SysCallKind::Delete => {
             // arg1: filepath  *const c_char
             // check if any process is using file
+            unimplemented!()
+        }
+        SysCallKind::Dup => {
+            // arg1: oldfd u64
+            with_curr_proc_mut(|p| {
+                let oldfd = p.fd.get(arg1).unwrap();
+                let lowest_fd = (0..MAX_FD).find(|i| p.fd.contains(*i)).unwrap();
+                p.fd[lowest_fd] = oldfd.clone();
+                lowest_fd
+            })
+        }
+        SysCallKind::Dup2 => {
+            // arg1: oldfd u64
+            // arg2: newfd u64
+            if arg1 != arg2 {
+                with_curr_proc_mut(|p| {
+                    let oldfd = p.fd.get(arg1).unwrap();
+                    p.fd[arg2] = oldfd.clone();
+                });
+            }
+
+            arg2
+        }
+        SysCallKind::Yield => {
+            yield_sched();
+            unreachable!();
+        }
+        SysCallKind::Uname => {
+            // arg1: *mut UtsName
+            let utsname = arg1 as *mut UtsName;
+            unsafe { ptr::copy(&*UNAME as *const UtsName, utsname, 1) };
+            0
+        }
+        SysCallKind::Getcwd => {
+            // arg1: buffer *u8
+            // arg2: len (usize)
+            let abs_cwd = with_curr_proc(|p| p.cwd.read().full_path());
+            copy_str_to_userbuf(abs_cwd, arg1, arg2)
+        }
+        SysCallKind::Lseek => {
+            // arg1: fd u64
+            // arg2: offset usize
+            // arg3 (for now we won't implement): whence (SEEK_START, SEEK_CUR, SEEK_END) like starting from where
+            with_curr_proc_mut(|p| {
+                let file = p.fd[arg1];
+                let pos = file.pos.lock();
+                let new_pos = core::cmp::min(file.inode.meta.lock().size, *pos + arg2);
+                *pos = new_pos;
+            });
+
+            0
+        }
+        SysCallKind::Getdents => {
+            // arg1: fd u64
+            // arg2: addr of *mut DEntryMinimal
+            // arg3: count usize
+            unimplemented!()
+        }
+        SysCallKind::Ioctl => {
+            // arg1: fd u64
+            // arg2: request u64
+            // arg3: args void*
+            unimplemented!()
+        }
+        SysCallKind::Fnctl => {
+            // arg1: fd u64
+            // arg2: cmd u64
+            // arg3: args void*
+            unimplemented!()
+        }
+        SysCallKind::Pipe => {
+            // arg1: pipefd int[2]
+            unimplemented!()
         }
         // NOTE: this can only rename files within the same dir currently
         // TODO: make this operate more like the `mv` cmd!
@@ -272,12 +370,6 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 .ops
                 .rename(&old_dir_guard.inode, new_filename);
             0
-        }
-        SysCallKind::Getdents => {
-            // arg1: fd u64
-            // arg2: addr of *mut DEntryMinimal
-            // arg3: count usize
-            unimplemented!()
         }
         SysCallKind::Exit => {
             // arg1: status
@@ -308,7 +400,6 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         }
         SysCallKind::Alloc => sys_alloc(arg1),
         SysCallKind::GetUnixTime => sys_get_unix_time(),
-        _ => unimplemented!(),
     };
     trap_frame.rax = return_value;
 }
@@ -318,7 +409,6 @@ fn sys_get_unix_time() -> usize {
         .load(core::sync::atomic::Ordering::Relaxed)
         .div_ceil(1000) as usize;
     let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
-    serial_println!("{}", boot_unix + elapsed_sec);
     boot_unix + elapsed_sec
 }
 

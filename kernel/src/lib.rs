@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
+use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::{
     structures::paging::{frame::PhysFrameRangeInclusive, OffsetPageTable, PageTable, Size2MiB},
@@ -27,9 +28,30 @@ pub mod mem;
 pub mod syscall;
 pub mod task;
 
+lazy_static! {
+    pub static ref UNAME: UtsName = UtsName {
+        sysname: "XiangQi OS",
+        nodename: "qi-box",
+        release: "unreleased",
+        version: "0.1 (in dev)",
+        machine: "x86_64",
+    };
+}
+
 pub static BOOT_INFO: OnceCell<Mutex<BootInfo>> = OnceCell::uninit();
 pub static SCREEN: OnceCell<Mutex<Screen>> = OnceCell::uninit();
 pub static PROC: OnceCell<Mutex<Vec<ProcessControlBlock>>> = OnceCell::uninit();
+
+// nodename - hardcoded due to lack of network support
+// machine - hardcoded due to only support for x86_64
+#[derive(Debug)]
+pub struct UtsName {
+    pub sysname: &'static str,
+    pub nodename: &'static str,
+    pub release: &'static str,
+    pub version: &'static str,
+    pub machine: &'static str,
+}
 
 #[derive(Debug)]
 pub struct BootInfo {
