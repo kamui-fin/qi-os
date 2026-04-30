@@ -1,5 +1,6 @@
 use core::any::Any;
 use core::ffi::CStr;
+use core::sync::atomic::AtomicU64;
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -11,6 +12,7 @@ use alloc::vec::Vec;
 use bitfield_struct::bitfield;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
+use lazy_static;
 use spin::{Mutex, RwLock};
 
 use crate::driver::ata::{AtaDriver, BusType, DriveType};
@@ -19,16 +21,23 @@ use crate::fs::fat::{BlockDevice, DirEntryWithLoc, FSInfo, Fat32, BPB};
 use crate::fs::ustar::USTAR;
 use crate::task::proc::{with_curr_proc, with_curr_proc_mut};
 
+lazy_static::lazy_static! {
+    pub static ref PIPE_FS: Arc<SuperBlock> = Arc::new(SuperBlock {
+        fs_type: FsType::PipeFs,
+    });
+}
+
 pub enum FsType {
     Fat32,
     Ustar,
+    PipeFs,
 }
 
 pub struct SuperBlock {
     pub fs_type: FsType,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum NodeType {
     File,
     Directory,
@@ -61,8 +70,8 @@ pub struct FsMetadata {
 }
 
 pub trait FileOps: Send + Sync {
-    fn read(&self, file: &File, buffer: &mut [u8]);
-    fn write(&self, file: &File, buffer: &[u8]);
+    fn read(&self, file: &File, buffer: &mut [u8]) -> usize;
+    fn write(&self, file: &File, buffer: &[u8]) -> usize;
 }
 
 pub trait INodeOps: Send + Sync {
@@ -75,6 +84,7 @@ pub trait INodeOps: Send + Sync {
     fn mkdir(&self, dir: &INode, name: &str);
     fn delete_file(&self, file: &INode);
     fn rmdir(&self, dir: &INode);
+    fn stat(&self, node: &INode) -> Stat;
 }
 
 pub struct DEntry {
@@ -141,10 +151,12 @@ pub struct File {
     pub ops: Arc<dyn FileOps>,
 }
 
+pub static PIPE_ID_COUNT: AtomicU64 = AtomicU64::new(0);
+
 pub struct Pipe {
-    buffer: ArrayQueue<u8>,
-    readers: usize,
-    writers: usize,
+    pub buffer: ArrayQueue<u8>,
+    pub readers: usize,
+    pub writers: usize,
     /* rd_queue: WaitQueue,
     wr_queue: WaitQueue, */
 }
@@ -157,15 +169,56 @@ pub static DEVICE_TABLE: OnceCell<Vec<Device>> = OnceCell::uninit();
 
 #[derive(Debug)]
 pub struct Stat {
-    dev: u64,       /* ID of device containing file */
-    ino: u64,       /* inode number */
-    mode: NodeType, /* inode type */
-    rdev: u64,      /* device ID (if special file) */
-    nlink: usize,   /* always 1 on fat32 */
-    size: usize,    /* total size, in bytes */
-    blksize: u64,   /* blocksize for file system I/O */
-    blocks: u64,    /* number of 512B blocks allocated */
-    mtime: u64,     /* time of last modification */
+    pub dev: u64,       /* ID of device containing file */
+    pub ino: u64,       /* inode number */
+    pub mode: NodeType, /* inode type */
+    pub rdev: u64,      /* device ID (if special file) */
+    pub nlink: usize,   /* always 1 on fat32 */
+    pub size: usize,    /* total size, in bytes */
+    pub blksize: u64,   /* blocksize for file system I/O */
+    pub blocks: u64,    /* number of 512B blocks allocated */
+    pub mtime: u64,     /* time of last modification */
+}
+
+pub struct PipeInodeOps;
+pub struct PipeOps;
+
+impl INodeOps for PipeInodeOps {
+    fn read(&self, inode: &INode, offset: usize, buf: &mut [u8]) -> usize {
+        0
+    }
+    fn write(&self, inode: &INode, offset: usize, buf: &[u8]) -> usize {
+        0
+    }
+    fn lookup(&self, parent: &INode, name: &str) -> Option<INode> {
+        None
+    }
+    fn readdir(&self, dir: &INode) -> Vec<DEntryMinimal> {
+        vec![]
+    }
+    fn create_file(&self, dir: &INode, name: &str) {}
+    fn rename(&self, node: &INode, to: &str) {}
+    fn mkdir(&self, dir: &INode, name: &str) {}
+    fn delete_file(&self, file: &INode) {}
+    fn rmdir(&self, dir: &INode) {}
+
+    fn stat(&self, node: &INode) -> Stat {
+        let INodeData::Pipe(pipe) = &node.data else {
+            panic!("expected pipe data");
+        };
+        let meta = node.meta.lock();
+        Stat {
+            dev: 0,
+            ino: node.inum,
+            mode: node.mode,
+            rdev: 0,
+            nlink: 1,
+            size: pipe.buffer.len(),
+            blksize: 4096,
+            blocks: 0,
+            mtime: meta.mtime,
+        }
+    }
 }
 
 // NOTE: ensure sanitized to absolute paths before passed to VFS layer
@@ -289,13 +342,31 @@ pub fn sys_read(fd: Fd, buf: &mut [u8]) -> usize {
 pub struct GenericFileOps;
 
 impl FileOps for GenericFileOps {
-    fn read(&self, file: &File, buffer: &mut [u8]) {
-        file.inode.ops.read(&file.inode, *file.pos.lock(), buffer);
+    fn read(&self, file: &File, buffer: &mut [u8]) -> usize {
+        file.inode.ops.read(&file.inode, *file.pos.lock(), buffer)
     }
 
-    fn write(&self, file: &File, buffer: &[u8]) {
-        file.inode.ops.write(&file.inode, *file.pos.lock(), buffer);
+    fn write(&self, file: &File, buffer: &[u8]) -> usize {
+        file.inode.ops.write(&file.inode, *file.pos.lock(), buffer)
     }
+}
+
+impl FileOps for PipeOps {
+    fn read(&self, file: &File, buffer: &mut [u8]) -> usize {
+        let node = &file.inode;
+        let INodeData::Pipe(pipe) = &node.data else {
+            panic!("expected pipe data");
+        };
+
+        if pipe.buffer.is_empty() {
+            if pipe.writers == 0 {
+                return 0; // eof if all write ends closed
+            }
+            // sleep throw into wait queue
+        }
+    }
+
+    fn write(&self, file: &File, buffer: &[u8]) -> usize {}
 }
 
 #[bitfield(u64)]

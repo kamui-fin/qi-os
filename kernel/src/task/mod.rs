@@ -12,6 +12,7 @@ pub mod mouse;
 pub mod proc;
 pub mod thread;
 pub mod tty;
+pub mod wait_queue;
 
 pub struct Task {
     id: TaskId,

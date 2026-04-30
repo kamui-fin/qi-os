@@ -4,7 +4,15 @@ use crate::fs::vfs::sys_close;
 use crate::fs::vfs::sys_open;
 use crate::fs::vfs::sys_read;
 use crate::fs::vfs::sys_write;
+use crate::fs::vfs::File;
+use crate::fs::vfs::FsMetadata;
+use crate::fs::vfs::INode;
 use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::Pipe;
+use crate::fs::vfs::PipeInodeOps;
+use crate::fs::vfs::Stat;
+use crate::fs::vfs::PIPE_FS;
+use crate::fs::vfs::PIPE_ID_COUNT;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
 use crate::serial_print;
@@ -20,6 +28,7 @@ use crate::BOOT_INFO;
 use crate::PROC;
 use crate::SCREEN;
 use crate::UNAME;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use common::UserWindow;
 use core::arch::naked_asm;
@@ -27,7 +36,9 @@ use core::{
     ffi::{c_char, CStr},
     ptr,
 };
+use crossbeam_queue::ArrayQueue;
 use futures_util::future::Either;
+use spin::Mutex;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::OffsetPageTable;
@@ -272,13 +283,28 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Fstat => {
             // arg1: fd (u64)
             // arg2: *mut Stat
-            unimplemented!()
+            let stat = with_curr_proc(|p| {
+                let file = p.fd.get(arg1 as usize).unwrap().clone();
+                file.inode.ops.stat(&file.inode)
+            });
+
+            let user_stat = arg1 as *mut Stat;
+            unsafe { ptr::copy(&stat as *const Stat, user_stat, 1) };
+
+            0
         }
-        // TODO: refactor to be unlink
+        // TODO: refactor to use unlink and only delete fr if link = 0
         SysCallKind::Delete => {
             // arg1: filepath  *const c_char
-            // check if any process is using file
-            unimplemented!()
+            // TODO: check if any process is using file
+            let filepath = (unsafe { CStr::from_ptr(arg1 as *const i8) })
+                .to_str()
+                .unwrap();
+            let path_dent = find_dentry(filepath).unwrap();
+            let path_dent = path_dent.read();
+            path_dent.inode.ops.delete_file(&path_dent.inode);
+
+            0
         }
         SysCallKind::Dup => {
             // arg1: oldfd u64
@@ -350,7 +376,36 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         }
         SysCallKind::Pipe => {
             // arg1: pipefd int[2]
-            unimplemented!()
+            let pipe = Pipe {
+                buffer: ArrayQueue::new(4096),
+                readers: 1,
+                writers: 1,
+            };
+            let inode = Arc::new(INode {
+                inum: PIPE_ID_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+                fs: PIPE_FS.clone(),
+                mode: crate::fs::vfs::NodeType::Pipe,
+                data: crate::fs::vfs::INodeData::Pipe(Arc::new(pipe)),
+                meta: Mutex::new(FsMetadata {
+                    size: 4096,
+                    mtime: 0,
+                }),
+                ops: Arc::new(PipeInodeOps),
+            });
+            let write_file = File {
+                inode: inode.clone(),
+                pos: Mutex::new(0),
+                flag: crate::fs::vfs::AccessMode::WriteOnly,
+                ops: PipeOps,
+            };
+            let read_file = File {
+                inode: inode.clone(),
+                pos: Mutex::new(0),
+                flag: crate::fs::vfs::AccessMode::ReadOnly,
+                ops: PipeOps,
+            };
+
+            0
         }
         // NOTE: this can only rename files within the same dir currently
         // TODO: make this operate more like the `mv` cmd!

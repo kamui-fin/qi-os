@@ -224,6 +224,10 @@ impl AtaDriver {
 }
 
 impl BlockDevice for AtaDriver {
+    fn id(&self) -> u64 {
+        self.drive as u64
+    }
+
     fn read(&self, lba: u64, sectors: u8, buffer: &mut [u8]) -> Result<usize, AtaError> {
         let actual_sectors: usize = if sectors == 0 { 256 } else { sectors as usize };
         let (sector_capacity, leftover) = (buffer.len().div_ceil(512), buffer.len() % 512);

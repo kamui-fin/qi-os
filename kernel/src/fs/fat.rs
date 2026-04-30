@@ -19,7 +19,9 @@ use spin::Mutex;
 use x86_64::align_down;
 
 use crate::driver::cmos::get_unix_time;
-use crate::fs::vfs::{DEntry, DEntryMinimal, INode, INodeData, INodeOps, NodeType, SuperBlock};
+use crate::fs::vfs::{
+    DEntry, DEntryMinimal, INode, INodeData, INodeOps, NodeType, Stat, SuperBlock,
+};
 use crate::{driver::ata::AtaError, serial_println};
 
 use super::vfs;
@@ -256,6 +258,7 @@ fn get_fat_timedate() -> (u16, u16) {
 
 // TODO: make Error type generic!
 pub trait BlockDevice {
+    fn id(&self) -> u64;
     fn read(&self, lba: u64, sectors: u8, buffer: &mut [u8]) -> Result<usize, AtaError>;
     fn write(&self, lba: u64, data: &[u8]) -> Result<(), AtaError>;
 }
@@ -993,5 +996,20 @@ impl<'a, D: BlockDevice + Sync + Send> INodeOps for Fat32<'a, D> {
                 filetype: attr_to_node_type(e.entry.attr),
             })
             .collect()
+    }
+
+    fn stat(&self, node: &INode) -> Stat {
+        let meta = node.meta.lock();
+        Stat {
+            dev: self.disk.id(),
+            ino: node.inum,
+            mode: node.mode,
+            rdev: 0,
+            nlink: 1,
+            size: meta.size,
+            blksize: 512,
+            blocks: meta.size.div_ceil(512) as u64,
+            mtime: meta.mtime,
+        }
     }
 }
