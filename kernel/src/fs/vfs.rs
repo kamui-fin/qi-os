@@ -37,6 +37,7 @@ pub enum FsType {
     Fat32,
     Ustar,
     PipeFs,
+    DevFs,
 }
 
 pub struct SuperBlock {
@@ -78,20 +79,26 @@ pub struct FsMetadata {
 pub trait FileOps: Send + Sync {
     fn read(&self, file: &File, buffer: &mut [u8]) -> usize;
     fn write(&self, file: &File, buffer: &[u8]) -> usize;
+    fn close(&self, file: &File) {}
+    fn ioctl(&self, cmd: u64, arg: u64) {}
 }
 
 pub trait INodeOps: Send + Sync {
-    fn read(&self, inode: &INode, offset: usize, buf: &mut [u8]) -> usize;
-    fn write(&self, inode: &INode, offset: usize, buf: &[u8]) -> usize;
-    fn lookup(&self, parent: &INode, name: &str) -> Option<INode>;
-    fn readdir(&self, dir: &INode) -> Vec<DEntryMinimal>;
-    fn create_file(&self, dir: &INode, name: &str);
-    fn rename(&self, node: &INode, to: &str);
-    fn mkdir(&self, dir: &INode, name: &str);
-    fn delete_file(&self, file: &INode);
-    fn rmdir(&self, dir: &INode);
-    fn stat(&self, node: &INode) -> Stat;
-    fn ioctl(&self, cmd: u64, arg: u64);
+    fn open(&self, inode: &INode, flags: OpenFlags) -> Arc<dyn FileOps>;
+    fn lookup(&self, parent: &INode, name: &str) -> Option<INode> {
+        None
+    }
+    fn readdir(&self, dir: &INode) -> Vec<DEntryMinimal> {
+        vec![]
+    }
+    fn create_file(&self, dir: &INode, name: &str) {}
+    fn rename(&self, node: &INode, to: &str) {}
+    fn mkdir(&self, dir: &INode, name: &str) {}
+    fn delete_file(&self, file: &INode) {}
+    fn rmdir(&self, dir: &INode) {}
+    fn stat(&self, node: &INode) -> Stat {
+        Stat::default()
+    }
 }
 
 pub struct DEntry {
@@ -210,12 +217,6 @@ pub struct Pipe {
     pub writers: usize,
 }
 
-pub struct Device {
-    ops: Arc<dyn FileOps>,
-}
-
-pub static DEVICE_TABLE: OnceCell<Vec<Device>> = OnceCell::uninit();
-
 #[derive(Debug)]
 pub struct Stat {
     pub dev: u64,       /* ID of device containing file */
@@ -229,29 +230,26 @@ pub struct Stat {
     pub mtime: u64,     /* time of last modification */
 }
 
+impl Default for Stat {
+    fn default() -> Self {
+        Self {
+            dev: 0,
+            ino: 0,
+            mode: NodeType::CharDevice,
+            rdev: 0,
+            nlink: 0,
+            size: 0,
+            blksize: 0,
+            blocks: 0,
+            mtime: 0,
+        }
+    }
+}
+
 pub struct PipeInodeOps;
 pub struct PipeOps;
 
 impl INodeOps for PipeInodeOps {
-    fn read(&self, inode: &INode, offset: usize, buf: &mut [u8]) -> usize {
-        0
-    }
-    fn write(&self, inode: &INode, offset: usize, buf: &[u8]) -> usize {
-        0
-    }
-    fn lookup(&self, parent: &INode, name: &str) -> Option<INode> {
-        None
-    }
-    fn readdir(&self, dir: &INode) -> Vec<DEntryMinimal> {
-        vec![]
-    }
-    fn create_file(&self, dir: &INode, name: &str) {}
-    fn rename(&self, node: &INode, to: &str) {}
-    fn mkdir(&self, dir: &INode, name: &str) {}
-    fn delete_file(&self, file: &INode) {}
-    fn rmdir(&self, dir: &INode) {}
-    fn ioctl(&self, cmd: u64, arg: u64) {}
-
     fn stat(&self, node: &INode) -> Stat {
         let INodeData::Pipe(pipe) = &node.data else {
             panic!("expected pipe data");
@@ -347,9 +345,7 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
         let val_to_add;
         if file.status_flags().contains(StatusFlags::APPEND) {
             val_to_add = size + buf.len();
-            file.inode
-                .ops
-                .write(&file.inode, file.inode.meta.lock().size, buf);
+            file.ops.append(&file, buf);
 
             file.inode.meta.lock().size += buf.len();
 
@@ -361,7 +357,7 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
             } else {
                 buf.len()
             };
-            file.inode.ops.write(&file.inode, file.pos, buf);
+            file.ops.write(&file, buf);
             file.pos += val_to_add;
         }
 
@@ -373,30 +369,19 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
 pub fn sys_read(fd: Fd, buf: &mut [u8]) -> usize {
     with_curr_proc(|p| {
         let mut file = p.fd.get(fd as usize).unwrap().lock();
-        file.inode.ops.read(&file.inode, file.pos, buf);
+        let bytes_read = file.ops.read(&file, buf);
 
+        // HELPME: Should this stuff be inside FileOps::read() or inside this syscall?
         let pos = file.pos;
         let size = file.inode.meta.lock().size;
-        let val_to_add = if pos + buf.len() >= size {
+        let val_to_add = if pos + bytes_read >= size {
             size - pos
         } else {
-            buf.len()
+            bytes_read
         };
         file.pos += val_to_add;
         val_to_add
     })
-}
-
-pub struct GenericFileOps;
-
-impl FileOps for GenericFileOps {
-    fn read(&self, file: &File, buffer: &mut [u8]) -> usize {
-        file.inode.ops.read(&file.inode, file.pos, buffer)
-    }
-
-    fn write(&self, file: &File, buffer: &[u8]) -> usize {
-        file.inode.ops.write(&file.inode, file.pos, buffer)
-    }
 }
 
 impl FileOps for PipeOps {
@@ -603,6 +588,42 @@ pub fn mount_initramfs(table: &mut MountTable, mount_path: &str) {
     };
 
     table.insert(mount_path.into(), ustarfs);
+}
+
+pub struct Device {
+    ops: Arc<dyn FileOps>,
+}
+
+pub static DEVICE_TABLE: OnceCell<Vec<Device>> = OnceCell::uninit();
+
+// // For each char device, we implement
+// struct Zero;
+// impl FileOps for Zero {
+//     fn read(&self, file: &File, buffer: &mut [u8]) -> usize { }
+//     fn write(&self, file: &File, buffer: &[u8]) -> usize { }
+// }
+
+// fn dev_zero() {
+//     let sb = Arc::new(SuperBlock {
+//         fs_type: FsType::DevFs,
+//     });
+//     let inode = INode {
+//         inum: 0,
+//         fs: sb,
+//         mode: NodeType::CharDevice,
+//         data: INodeData::Device { major: 0, minor: 0 },
+//         meta: Mutex::new(FsMetadata { size: 0, mtime: 0 }),
+//         ops: Zero
+//     }
+// }
+
+pub fn mount_devfs() {
+    //     - /dev/zero
+    //     - /dev/null
+    //     - /dev/urandom
+    //     - /dev/mouse
+    //     - /dev/keyboard
+    //     - /dev/stdin, /dev/stdout, /dev/stderr
 }
 
 pub fn init_vfs() {

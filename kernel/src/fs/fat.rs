@@ -20,7 +20,7 @@ use x86_64::align_down;
 
 use crate::driver::cmos::get_unix_time;
 use crate::fs::vfs::{
-    DEntry, DEntryMinimal, INode, INodeData, INodeOps, NodeType, Stat, SuperBlock,
+    DEntry, DEntryMinimal, FileOps, INode, INodeData, INodeOps, NodeType, Stat, SuperBlock,
 };
 use crate::{driver::ata::AtaError, serial_println};
 
@@ -182,9 +182,10 @@ bitflags! {
     }
 }
 
-pub struct Fat32<'a, D: BlockDevice> {
-    bpb: &'a BPB,
-    fs_info: &'a FSInfo,
+#[derive(Clone)]
+pub struct Fat32<D: BlockDevice> {
+    bpb: Arc<BPB>,
+    fs_info: Arc<FSInfo>,
     disk: D,
 
     // derived
@@ -263,7 +264,7 @@ pub trait BlockDevice {
     fn write(&self, lba: u64, data: &[u8]) -> Result<(), AtaError>;
 }
 
-impl<'a, D: BlockDevice> Fat32<'a, D> {
+impl<D: BlockDevice> Fat32<D> {
     fn cluster_to_lba(&self, cluster: u32) -> u32 {
         self.data_start + (cluster - 2) * self.bpb.sectors_per_cluster as u32
     }
@@ -279,7 +280,7 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
         }
     }
 
-    pub fn new(bpb: &'a BPB, fs_info: &'a FSInfo, disk: D) -> Self {
+    pub fn new(bpb: Arc<BPB>, fs_info: Arc<FSInfo>, disk: D) -> Self {
         let fat_start = bpb.reserved_sector_count as u32;
         let data_start = fat_start + (bpb.num_fats as u32 * bpb.fat_size_32) as u32;
 
@@ -900,7 +901,28 @@ impl<'a, D: BlockDevice> Fat32<'a, D> {
     }
 }
 
-impl<'a, D: BlockDevice + Sync + Send> INodeOps for Fat32<'a, D> {
+impl<D: BlockDevice + Sync + Send> FileOps for Fat32<D> {
+    fn read(&self, file: &vfs::File, buffer: &mut [u8]) -> usize {
+        let INodeData::FatFs(data) = &file.inode.data else {
+            panic!("fat32 driver received non-FAT inode {}!", file.inode.inum);
+        };
+
+        self.read_buffer(&data.lock(), buffer)
+    }
+
+    fn write(&self, file: &vfs::File, buffer: &[u8]) -> usize {
+        let INodeData::FatFs(data) = &file.inode.data else {
+            panic!("fat32 driver received non-FAT inode {}!", file.inode.inum);
+        };
+        self.write_buffer(&mut data.lock(), file.pos, buffer)
+    }
+}
+
+impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
+    fn open(&self, inode: &INode, flags: vfs::OpenFlags) -> Arc<dyn vfs::FileOps> {
+        Arc::new(self.clone())
+    }
+
     fn lookup(&self, parent: &INode, name: &str) -> Option<INode> {
         let to_inode = |d: DirEntryWithLoc| {
             let bytes_per_cluster = (self.bpb.sectors_per_cluster as usize) * 512;
@@ -932,22 +954,6 @@ impl<'a, D: BlockDevice + Sync + Send> INodeOps for Fat32<'a, D> {
         let dir = self.find(parent.inum as u32, name);
         dir.map(|d| to_inode(d))
     }
-
-    fn read(&self, node: &INode, offset: usize, buf: &mut [u8]) -> usize {
-        let INodeData::FatFs(data) = &node.data else {
-            panic!("fat32 driver received non-FAT inode {}!", node.inum);
-        };
-
-        self.read_buffer(&data.lock(), buf)
-    }
-
-    fn write(&self, node: &INode, offset: usize, buf: &[u8]) -> usize {
-        let INodeData::FatFs(data) = &node.data else {
-            panic!("fat32 driver received non-FAT inode {}!", node.inum);
-        };
-        self.write_buffer(&mut data.lock(), offset, buf)
-    }
-
     fn create_file(&self, dir: &INode, name: &str) {
         self.create_file(dir.inum as u32, name);
     }
@@ -1012,6 +1018,4 @@ impl<'a, D: BlockDevice + Sync + Send> INodeOps for Fat32<'a, D> {
             mtime: meta.mtime,
         }
     }
-
-    fn ioctl(&self, cmd: u64, arg: u64) {}
 }

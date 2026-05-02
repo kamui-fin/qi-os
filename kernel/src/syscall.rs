@@ -409,7 +409,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg3: args void*
             with_curr_proc_mut(|p| {
                 let fd = p.fd.get(arg1).unwrap().lock();
-                fd.inode.ops.ioctl(arg2 as u64, arg3 as u64);
+                fd.ops.ioctl(arg2 as u64, arg3 as u64);
             });
 
             0

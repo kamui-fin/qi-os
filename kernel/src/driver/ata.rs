@@ -113,7 +113,7 @@ fn parse_disk_info(buffer: [u16; 256]) -> IdentifyDiskInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AtaDriver {
     bus_type: BusType,
     drive: u8,
