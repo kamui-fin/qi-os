@@ -1,30 +1,28 @@
 # Roadmap
 
-- VFS
-    - Character devices
-    - Pipes
-    - /tmp 
-    - /proc
-- Environment variables
-- Stack smash protector
-- Unit + Integraiton testing setup
-- TTY:
-    - tty1: read-only log buffer
-    - tty2: normal terminal
-- More concurrency:
+- env var
+- devfs
+
+- unit + integration testing setup
+- more concurrency:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
+- buddy + slab allocator
+- tmpfs
+
+- TTY:
+    - tty1: read-only log buffer
+    - tty2: normal terminal
 - Shell
-- Reboot feature
-- Random seed
 - Compositing:
     - Wallpaper
     - Floating windows
     - Borders
 
 Wayyy into future:
+- stack smash protector
 - Sound
 - TCP/IP stack
 

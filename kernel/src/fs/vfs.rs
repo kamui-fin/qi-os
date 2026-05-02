@@ -10,8 +10,10 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use bitfield_struct::bitfield;
+use bitflags;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
+use elf::segment;
 use lazy_static;
 use spin::{Mutex, RwLock};
 
@@ -20,6 +22,10 @@ use crate::driver::cmos::get_unix_time;
 use crate::fs::fat::{BlockDevice, DirEntryWithLoc, FSInfo, Fat32, BPB};
 use crate::fs::ustar::USTAR;
 use crate::task::proc::{with_curr_proc, with_curr_proc_mut};
+use crate::task::thread::{block_task, block_task_drop_lock, BlockReason, ThreadState, SCHEDULER};
+use crate::PROC;
+
+const PIPE_BUF: usize = 1024;
 
 lazy_static::lazy_static! {
     pub static ref PIPE_FS: Arc<SuperBlock> = Arc::new(SuperBlock {
@@ -85,6 +91,7 @@ pub trait INodeOps: Send + Sync {
     fn delete_file(&self, file: &INode);
     fn rmdir(&self, dir: &INode);
     fn stat(&self, node: &INode) -> Stat;
+    fn ioctl(&self, cmd: u64, arg: u64);
 }
 
 pub struct DEntry {
@@ -95,6 +102,30 @@ pub struct DEntry {
     pub children: RwLock<BTreeMap<String, Arc<RwLock<DEntry>>>>,
 }
 
+pub fn full_path(dentry: Arc<RwLock<DEntry>>) -> String {
+    let mut segments = vec![];
+    let mut curr = dentry;
+    loop {
+        let (name, parent_weak) = {
+            let guard = curr.read();
+            (guard.name.clone(), guard.parent.clone())
+        };
+
+        segments.push(name);
+        if let Some(parent) = parent_weak {
+            if let Some(parent) = parent.upgrade() {
+                curr = parent;
+                continue;
+            }
+        }
+
+        break;
+    }
+    segments.reverse();
+    segments.join("/")
+}
+
+#[derive(Clone)]
 pub struct DEntryMinimal {
     pub name: String,
     pub inum: u32,
@@ -113,23 +144,34 @@ pub struct Mount {
 pub type MountTable = alloc::collections::BTreeMap<String, Mount>;
 
 #[derive(Debug, PartialEq, Eq)]
-#[repr(u64)]
+#[repr(u32)]
 pub enum AccessMode {
     ReadOnly,
     WriteOnly,
-    AppendOnly,
+    Append,
 }
 
 impl AccessMode {
     const fn into_bits(self) -> u64 {
         self as _
     }
-    const fn from_bits(value: u64) -> Self {
+    const fn from_bits(value: u32) -> Self {
         match value {
             0 => Self::ReadOnly,
             1 => Self::WriteOnly,
-            _ => Self::AppendOnly,
+            _ => Self::Append,
         }
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[repr(transparent)]
+    pub struct StatusFlags: u32 {
+        const CREATE   = 1 << 0;
+        const TRUNCATE = 1 << 1;
+        const APPEND   = 1 << 2;
+        const NONBLOCK = 1 << 3;
     }
 }
 
@@ -145,20 +187,27 @@ pub type Fd = u64;
 pub struct File {
     pub inode: Arc<INode>,
 
-    pub pos: Mutex<usize>,
-    pub flag: AccessMode,
+    pub pos: usize,
+    pub flags: OpenFlags,
 
     pub ops: Arc<dyn FileOps>,
+}
+
+impl File {
+    pub fn status_flags(&self) -> StatusFlags {
+        StatusFlags::from_bits_truncate(self.flags.status())
+    }
+    pub fn set_status(&mut self, status: StatusFlags) {
+        self.flags.set_status(status.bits());
+    }
 }
 
 pub static PIPE_ID_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub struct Pipe {
-    pub buffer: ArrayQueue<u8>,
+    pub buffer: Mutex<ArrayQueue<u8>>,
     pub readers: usize,
     pub writers: usize,
-    /* rd_queue: WaitQueue,
-    wr_queue: WaitQueue, */
 }
 
 pub struct Device {
@@ -201,6 +250,7 @@ impl INodeOps for PipeInodeOps {
     fn mkdir(&self, dir: &INode, name: &str) {}
     fn delete_file(&self, file: &INode) {}
     fn rmdir(&self, dir: &INode) {}
+    fn ioctl(&self, cmd: u64, arg: u64) {}
 
     fn stat(&self, node: &INode) -> Stat {
         let INodeData::Pipe(pipe) = &node.data else {
@@ -213,7 +263,7 @@ impl INodeOps for PipeInodeOps {
             mode: node.mode,
             rdev: 0,
             nlink: 1,
-            size: pipe.buffer.len(),
+            size: pipe.buffer.lock().len(),
             blksize: 4096,
             blocks: 0,
             mtime: meta.mtime,
@@ -292,12 +342,10 @@ pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
 
 pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
     with_curr_proc_mut(|p| {
-        let file = p.fd.get_mut(fd as usize).unwrap().clone();
-        let mut pos = file.pos.lock();
-
+        let mut file = p.fd.get_mut(fd as usize).unwrap().lock();
         let size = file.inode.meta.lock().size;
         let val_to_add;
-        if let AccessMode::AppendOnly = file.flag {
+        if file.status_flags().contains(StatusFlags::APPEND) {
             val_to_add = size + buf.len();
             file.inode
                 .ops
@@ -305,16 +353,16 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
 
             file.inode.meta.lock().size += buf.len();
 
-            *pos = val_to_add;
+            file.pos = val_to_add;
         } else {
             // TODO: allow write to exceed file size
-            val_to_add = if *pos + buf.len() >= size {
-                size.saturating_sub(*pos)
+            val_to_add = if file.pos + buf.len() >= size {
+                size.saturating_sub(file.pos)
             } else {
                 buf.len()
             };
-            file.inode.ops.write(&file.inode, *pos, buf);
-            *pos += val_to_add;
+            file.inode.ops.write(&file.inode, file.pos, buf);
+            file.pos += val_to_add;
         }
 
         file.inode.meta.lock().mtime = get_unix_time() as u64;
@@ -324,17 +372,17 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
 
 pub fn sys_read(fd: Fd, buf: &mut [u8]) -> usize {
     with_curr_proc(|p| {
-        let file = p.fd.get(fd as usize).unwrap().clone();
-        file.inode.ops.read(&file.inode, *file.pos.lock(), buf);
+        let mut file = p.fd.get(fd as usize).unwrap().lock();
+        file.inode.ops.read(&file.inode, file.pos, buf);
 
-        let mut pos = file.pos.lock();
+        let pos = file.pos;
         let size = file.inode.meta.lock().size;
-        let val_to_add = if *pos + buf.len() >= size {
-            size - *pos
+        let val_to_add = if pos + buf.len() >= size {
+            size - pos
         } else {
             buf.len()
         };
-        *pos += val_to_add;
+        file.pos += val_to_add;
         val_to_add
     })
 }
@@ -343,39 +391,121 @@ pub struct GenericFileOps;
 
 impl FileOps for GenericFileOps {
     fn read(&self, file: &File, buffer: &mut [u8]) -> usize {
-        file.inode.ops.read(&file.inode, *file.pos.lock(), buffer)
+        file.inode.ops.read(&file.inode, file.pos, buffer)
     }
 
     fn write(&self, file: &File, buffer: &[u8]) -> usize {
-        file.inode.ops.write(&file.inode, *file.pos.lock(), buffer)
+        file.inode.ops.write(&file.inode, file.pos, buffer)
     }
 }
 
 impl FileOps for PipeOps {
     fn read(&self, file: &File, buffer: &mut [u8]) -> usize {
         let node = &file.inode;
+        let pipe_id = node.inum;
         let INodeData::Pipe(pipe) = &node.data else {
             panic!("expected pipe data");
         };
 
-        if pipe.buffer.is_empty() {
+        let mut bytes_read = 0;
+        loop {
+            let guard = pipe.buffer.lock();
+
+            if !guard.is_empty() {
+                while let Some(byte) = guard.pop() {
+                    if bytes_read >= buffer.len() {
+                        break;
+                    }
+                    buffer[bytes_read] = byte;
+                    bytes_read += 1;
+                }
+
+                break;
+            }
+
             if pipe.writers == 0 {
                 return 0; // eof if all write ends closed
             }
+
             // sleep throw into wait queue
+            block_task_drop_lock(BlockReason::WaitPipeRead(pipe_id), guard)
         }
+
+        if bytes_read > 0 {
+            wake_pipe_sleepers(pipe_id, Direction::Write);
+        }
+
+        bytes_read
     }
 
-    fn write(&self, file: &File, buffer: &[u8]) -> usize {}
+    fn write(&self, file: &File, buffer: &[u8]) -> usize {
+        let node = &file.inode;
+        let pipe_id = node.inum;
+        let INodeData::Pipe(pipe) = &node.data else {
+            panic!("expected pipe data");
+        };
+
+        let mut bytes_write = 0;
+
+        for chunk in buffer.chunks(PIPE_BUF) {
+            loop {
+                let guard = pipe.buffer.lock();
+                if chunk.len() + guard.len() > guard.capacity() {
+                    if pipe.readers == 0 {
+                        return bytes_write;
+                    }
+                    block_task_drop_lock(BlockReason::WaitPipeWrite(pipe_id), guard)
+                } else {
+                    for byte in chunk {
+                        guard.push(*byte);
+                        bytes_write += 1;
+                    }
+
+                    drop(guard);
+
+                    wake_pipe_sleepers(pipe_id, Direction::Read);
+
+                    break;
+                }
+            }
+        }
+
+        bytes_write
+    }
+}
+
+enum Direction {
+    Read,
+    Write,
+}
+
+// TODO: obviously this is O(n) but its a quick directly
+fn wake_pipe_sleepers(pipe_id: u64, dir: Direction) {
+    let mut sched = SCHEDULER.lock();
+    let procs = PROC.get().unwrap().lock();
+    for proc in procs.iter() {
+        let thread = proc.tcb.lock();
+        match (&dir, &thread.state) {
+            (Direction::Read, ThreadState::Blocked(BlockReason::WaitPipeRead(waiting_on)))
+            | (Direction::Write, ThreadState::Blocked(BlockReason::WaitPipeWrite(waiting_on))) => {
+                if *waiting_on == pipe_id {
+                    sched.unblock_task(thread.id);
+                }
+            }
+            _ => {}
+        };
+    }
 }
 
 #[bitfield(u64)]
 pub struct OpenFlags {
-    #[bits(64)]
+    #[bits(32)]
     pub access_mode: AccessMode,
+    #[bits(32)]
+    pub status: u32,
 }
 
-pub fn sys_open(path_addr: usize, flag: OpenFlags) -> Option<Fd> {
+pub fn sys_open(path_addr: usize, flags: OpenFlags) -> Option<Fd> {
     let path = unsafe { CStr::from_ptr(path_addr as *const i8) };
     let path = path.to_str().unwrap();
 
@@ -390,12 +520,12 @@ pub fn sys_open(path_addr: usize, flag: OpenFlags) -> Option<Fd> {
     let mp_root = mp.root.read();
     let inode = mp_root.inode.ops.lookup(&mp_root.inode, rel_path);
     if let Some(inode) = inode {
-        let file = Arc::new(File {
+        let file = Arc::new(Mutex::new(File {
             inode: Arc::new(inode),
-            pos: Mutex::new(0),
-            flag: flag.access_mode(),
+            pos: 0,
+            flags,
             ops: Arc::new(GenericFileOps),
-        });
+        }));
 
         let fd = with_curr_proc_mut(|p| {
             let entry = p.fd.vacant_key();
@@ -479,6 +609,7 @@ pub fn init_vfs() {
     let mut table: MountTable = MountTable::new();
     mount_fat32(&mut table, "/");
     mount_initramfs(&mut table, "/init");
+    // mount_devfs(&mut table, "/dev");
 
     MOUNT_TABLE.init_once(|| table);
 }

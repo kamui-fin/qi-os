@@ -15,6 +15,7 @@ use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
 use crate::print;
 use crate::println;
+use crate::random::mix_entropy;
 use crate::serial_print;
 use crate::serial_println;
 use crate::syscall::syscall_entry;
@@ -112,6 +113,8 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    mix_entropy();
+
     if !BOOT_RTC.is_initialized() {
         BOOT_RTC.init_once(|| get_rtc_time());
     }
@@ -170,6 +173,7 @@ enum MouseDataState {
 static mut ps2_mouse_state: MouseDataState = MouseDataState::WaitingForByte1;
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    mix_entropy();
     // i'm just lazy rn will refactor this massive unsafe block later
     unsafe {
         let mut status_port = Port::<u8>::new(0x64);
@@ -215,6 +219,8 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    mix_entropy();
+
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use spin::Mutex;
     use x86_64::instructions::port::Port;

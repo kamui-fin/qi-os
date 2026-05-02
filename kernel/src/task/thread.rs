@@ -35,6 +35,8 @@ pub enum BlockReason {
     Sleep(u64), // sleep expiry
     Terminated(u8),
     CompositorWait,
+    WaitPipeRead(u64),
+    WaitPipeWrite(u64),
 }
 
 #[repr(C)]
@@ -263,6 +265,22 @@ pub fn block_task(reason: BlockReason) {
         curr_thread.time_slice_remaining = TIME_SLICE;
 
         NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    switch_if_needed();
+}
+
+pub fn block_task_drop_lock<L>(reason: BlockReason, lock: L) {
+    {
+        let _guard = SCHEDULER.lock();
+
+        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        curr_thread.state = ThreadState::Blocked(reason);
+        curr_thread.time_slice_remaining = TIME_SLICE;
+
+        NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+
+        drop(lock);
     }
 
     switch_if_needed();

@@ -1012,4 +1012,6 @@ impl<'a, D: BlockDevice + Sync + Send> INodeOps for Fat32<'a, D> {
             mtime: meta.mtime,
         }
     }
+
+    fn ioctl(&self, cmd: u64, arg: u64) {}
 }

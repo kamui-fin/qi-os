@@ -24,6 +24,7 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
+use kernel::console::render_tty_buffer;
 use kernel::driver::cmos::get_rtc_time;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
@@ -31,6 +32,7 @@ use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::mem::allocator::init_heap;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
+use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::keyboard::print_keypresses;
 use kernel::task::lock::NEEDS_RESCHEDULE;
@@ -132,11 +134,11 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         kernel::driver::pit::init_pit();
         println!("[ OK ] Timer setup");
 
-        /* unsafe {
+        unsafe {
             mouse::init_ps2();
             mouse::init_ps2_mouse();
         }
-        println!("[ OK ] PS/2 Mouse initialized"); */
+        println!("[ OK ] PS/2 Mouse initialized");
 
         unsafe {
             MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
@@ -148,140 +150,59 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
 
     PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
 
+    init_rand();
+
     {
         let mut scheduler = SCHEDULER.lock();
-        // scheduler.spawn(2, cleaner_task as *const ());
-        // For now, compositor is just a kernel task
-        /* scheduler.spawn(3, compositor_task as *const ());
-        scheduler.spawn(4, async_executor_task as *const ()); */
+        scheduler.spawn(2, cleaner_task as *const ());
+        scheduler.spawn(3, compositor_task as *const ());
+        scheduler.spawn(4, async_executor_task as *const ());
+        scheduler.spawn(5, random_test as *const ());
         /* let args = [c"test".as_ptr()];
         spawn_proc(c"xiangqi", args.as_ptr(), 1); */
     }
 
-    init_vfs();
+    // init_vfs();
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
 
-    let root = get_root_dentry();
-
     hlt_loop();
+}
+
+#[repr(C, packed)]
+struct IdtPtr {
+    limit: u16,
+    base: u64,
+}
+
+fn reboot() {
+    let idt = IdtPtr { limit: 0, base: 0 };
+    unsafe {
+        asm!(
+            "cli",
+            "lidt [{0}]",
+            "int3",
+            in(reg) &idt,
+            options(noreturn)
+        );
+    }
+}
+
+fn random_test() {
+    nano_sleep(1_000_000 * 1000);
+    for _ in 0..100 {
+        serial_print!(" {} ", get_rand_range(1, 30));
+    }
+    terminate_task(0)
 }
 
 fn async_executor_task() {
     let mut executor = Executor::new();
     executor.spawn(Task::new(print_keypresses()));
-    // executor.spawn(Task::new(print_mouse_movement()));
-    executor.spawn(Task::new(render_tty_buffer()));
+    executor.spawn(Task::new(print_mouse_movement()));
+    // executor.spawn(Task::new(render_tty_buffer()));
     executor.run();
-}
-
-const BUFFER_HEIGHT: usize = 40;
-const BUFFER_WIDTH: usize = 150;
-
-struct ConsoleRenderer {
-    buffer: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
-    column_position: usize,
-}
-
-impl ConsoleRenderer {
-    fn new() -> Self {
-        Self {
-            buffer: [[ScreenChar::default(); BUFFER_WIDTH]; BUFFER_HEIGHT],
-            column_position: 0,
-        }
-    }
-    fn new_line(&mut self) {
-        for row in 1..BUFFER_HEIGHT {
-            for col in 0..BUFFER_WIDTH {
-                let character = self.buffer[row][col];
-                self.buffer[row - 1][col] = character;
-            }
-        }
-        self.clear_row(BUFFER_HEIGHT - 1);
-        self.column_position = 0;
-    }
-
-    fn clear_row(&mut self, row: usize) {
-        for col in 0..BUFFER_WIDTH {
-            self.buffer[row][col] = ScreenChar::default();
-        }
-    }
-
-    pub fn write_byte(&mut self, byte: u8) {
-        match byte {
-            b'\n' => self.new_line(),
-            byte => {
-                if self.column_position >= BUFFER_WIDTH {
-                    self.new_line();
-                }
-
-                let row = BUFFER_HEIGHT - 1;
-                let col = self.column_position;
-
-                let default_color = ColorCode::new(Color::Green, Color::Black);
-                self.buffer[row][col] = ScreenChar {
-                    ascii_character: byte,
-                    color_code: default_color,
-                };
-                self.column_position += 1;
-            }
-        }
-    }
-
-    pub fn paint(&mut self) {
-        // holding tihs lock throughout render pass might be bad... isolate out screen lock
-        let mut screen = SCREEN.get().unwrap().lock();
-
-        let line_height = 3;
-        let font = &FONT_10X20;
-
-        let style = MonoTextStyleBuilder::new()
-            .font(font)
-            .text_color(Rgb565::CSS_FOREST_GREEN)
-            .background_color(Rgb565::BLACK)
-            .build();
-
-        for row in 0..BUFFER_HEIGHT {
-            for col in 0..BUFFER_WIDTH {
-                let y = row * (font.character_size.height + line_height) as usize;
-                let x = col * (font.character_size.width + font.character_spacing) as usize;
-
-                let character = self.buffer[row][col];
-
-                let mut buf = [0u8; 1];
-                buf[0] = character.ascii_character;
-                let string = core::str::from_utf8(&buf).unwrap_or(" ");
-
-                // serial_println!("{string} at ({y}, {x})");
-                Text::new(&string, Point::new(x as i32, y as i32), style)
-                    .draw(&mut *screen)
-                    .unwrap();
-            }
-        }
-
-        screen.flush();
-    }
-}
-
-impl Default for ConsoleRenderer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-async fn render_tty_buffer() {
-    let mut renderer = ConsoleRenderer::new();
-    let mut console_chars = ConsoleStream::new();
-    while let Some(char) = console_chars.next().await {
-        renderer.write_byte(char.ascii_character);
-        // flush rest of queue
-        while let Some(Some(char)) = console_chars.next().now_or_never() {
-            renderer.write_byte(char.ascii_character);
-        }
-
-        renderer.paint();
-    }
 }
 
 fn compositor_task() {

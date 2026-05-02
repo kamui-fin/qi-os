@@ -46,7 +46,7 @@ pub struct ProcessControlBlock<'a> {
     pub backbuffer_frames: Option<Vec<PhysFrame>>,
 
     pub cwd: Arc<RwLock<DEntry>>,
-    pub fd: Slab<Arc<File>>,
+    pub fd: Slab<Arc<Mutex<File>>>,
 }
 
 const USER_STACK_SIZE: usize = 64 * 1024;

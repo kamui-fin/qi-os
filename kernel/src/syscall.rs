@@ -1,16 +1,20 @@
 use crate::fs::vfs::find_dentry;
 use crate::fs::vfs::find_parent_dentry;
+use crate::fs::vfs::full_path;
 use crate::fs::vfs::sys_close;
 use crate::fs::vfs::sys_open;
 use crate::fs::vfs::sys_read;
 use crate::fs::vfs::sys_write;
+use crate::fs::vfs::DEntryMinimal;
 use crate::fs::vfs::File;
 use crate::fs::vfs::FsMetadata;
 use crate::fs::vfs::INode;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::Pipe;
 use crate::fs::vfs::PipeInodeOps;
+use crate::fs::vfs::PipeOps;
 use crate::fs::vfs::Stat;
+use crate::fs::vfs::StatusFlags;
 use crate::fs::vfs::PIPE_FS;
 use crate::fs::vfs::PIPE_ID_COUNT;
 use crate::interrupts::BOOT_RTC;
@@ -28,10 +32,14 @@ use crate::BOOT_INFO;
 use crate::PROC;
 use crate::SCREEN;
 use crate::UNAME;
+use alloc::ffi::CString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use bitfield_struct::bitfield;
 use common::UserWindow;
 use core::arch::naked_asm;
+use core::ptr::copy_nonoverlapping;
+use core::str::FromStr;
 use core::{
     ffi::{c_char, CStr},
     ptr,
@@ -121,8 +129,14 @@ pub unsafe extern "C" fn syscall_entry() {
 // TODO to be more POSIX-like:
 //  - fork, exec, process tree
 //  - mmap, munmap: maps files or devices into memory (COMPLEX)
+//  - shmctl (shared memory)
 //  - kill, sigaction, sigreturn: send signal, register signal handler
 //  - poll / select / epoll: sleep until any of a set of FDs is ready
+//  - mknod
+//  - utime, ulimit, times
+//  - mount, umount, sync
+//  - nice (scheduling)
+//  - pause (block until signal)
 
 #[derive(Debug)]
 enum SysCallKind {
@@ -152,7 +166,7 @@ enum SysCallKind {
     //  (fd, request, datapointer) manipulates the underlying device parameters of special files
     Ioctl,
     //  ioctl but manage the fd itself. e.g. set to non-blocking!
-    Fnctl,
+    Fcntl,
 
     Spawn,
 
@@ -176,7 +190,7 @@ impl From<usize> for SysCallKind {
             3 => Self::Write,
             4 => Self::Lseek,
             5 => Self::Ioctl,
-            6 => Self::Fnctl,
+            6 => Self::Fcntl,
 
             7 => Self::Chdir,
             8 => Self::Getcwd,
@@ -208,6 +222,11 @@ impl From<usize> for SysCallKind {
             _ => panic!("unknown syscall number {}", value),
         }
     }
+}
+
+enum FcntlCommand {
+    SetFlags(u32),
+    GetFlags,
 }
 
 extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
@@ -284,7 +303,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd (u64)
             // arg2: *mut Stat
             let stat = with_curr_proc(|p| {
-                let file = p.fd.get(arg1 as usize).unwrap().clone();
+                let file = p.fd.get(arg1 as usize).unwrap().lock();
                 file.inode.ops.stat(&file.inode)
             });
 
@@ -340,18 +359,22 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Getcwd => {
             // arg1: buffer *u8
             // arg2: len (usize)
-            let abs_cwd = with_curr_proc(|p| p.cwd.read().full_path());
-            copy_str_to_userbuf(abs_cwd, arg1, arg2)
+            let abs_cwd = with_curr_proc(|p| full_path(p.cwd.clone()));
+            let abs_cwd = CString::from_str(&abs_cwd).unwrap();
+            let ptr = arg1 as *mut c_char;
+            unsafe { ptr::copy_nonoverlapping(abs_cwd.as_ptr(), ptr, arg2) };
+
+            0
         }
         SysCallKind::Lseek => {
             // arg1: fd u64
             // arg2: offset usize
             // arg3 (for now we won't implement): whence (SEEK_START, SEEK_CUR, SEEK_END) like starting from where
             with_curr_proc_mut(|p| {
-                let file = p.fd[arg1];
-                let pos = file.pos.lock();
-                let new_pos = core::cmp::min(file.inode.meta.lock().size, *pos + arg2);
-                *pos = new_pos;
+                let mut file = p.fd[arg1].lock();
+                let pos = file.pos;
+                let new_pos = core::cmp::min(file.inode.meta.lock().size, pos + arg2);
+                file.pos = new_pos;
             });
 
             0
@@ -360,24 +383,64 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd u64
             // arg2: addr of *mut DEntryMinimal
             // arg3: count usize
-            unimplemented!()
+            let (entries, offset) = with_curr_proc(|p| {
+                let file = p.fd.get(arg1 as usize).unwrap().lock();
+                (file.inode.ops.readdir(&file.inode), file.pos)
+            });
+
+            let user_dentry = arg2 as *mut DEntryMinimal;
+
+            let mut entries_written = 0;
+
+            for i in (offset)..(entries.len()) {
+                if entries_written >= arg3 {
+                    break;
+                }
+                let entry = &entries[i];
+                unsafe { ptr::write(user_dentry.add(entries_written), entry.clone()) }
+                entries_written += 1;
+            }
+
+            entries_written
         }
         SysCallKind::Ioctl => {
             // arg1: fd u64
             // arg2: request u64
             // arg3: args void*
-            unimplemented!()
+            with_curr_proc_mut(|p| {
+                let fd = p.fd.get(arg1).unwrap().lock();
+                fd.inode.ops.ioctl(arg2 as u64, arg3 as u64);
+            });
+
+            0
         }
-        SysCallKind::Fnctl => {
+        SysCallKind::Fcntl => {
             // arg1: fd u64
             // arg2: cmd u64
             // arg3: args void*
-            unimplemented!()
+
+            // this looks redundant rn but it's the groundwork for a refactor coming soon
+            let cmd = match arg2 {
+                1 => FcntlCommand::GetFlags,
+                2 => FcntlCommand::SetFlags(arg3 as u32),
+                _ => unimplemented!(),
+            };
+
+            match cmd {
+                FcntlCommand::SetFlags(flags) => with_curr_proc_mut(|p| {
+                    let mut fd = p.fd.get(arg1).unwrap().lock();
+                    fd.set_status(StatusFlags::from_bits_truncate(flags));
+                    0
+                }),
+                FcntlCommand::GetFlags => {
+                    with_curr_proc(|p| u64::from(p.fd.get(arg1).unwrap().lock().flags)) as usize
+                }
+            }
         }
         SysCallKind::Pipe => {
             // arg1: pipefd int[2]
             let pipe = Pipe {
-                buffer: ArrayQueue::new(4096),
+                buffer: Mutex::new(ArrayQueue::new(4096)),
                 readers: 1,
                 writers: 1,
             };
@@ -392,18 +455,30 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 }),
                 ops: Arc::new(PipeInodeOps),
             });
-            let write_file = File {
+            let write_file = Arc::new(Mutex::new(File {
                 inode: inode.clone(),
-                pos: Mutex::new(0),
-                flag: crate::fs::vfs::AccessMode::WriteOnly,
-                ops: PipeOps,
-            };
-            let read_file = File {
+                pos: 0,
+                flags: OpenFlags::new(),
+                ops: Arc::new(PipeOps),
+            }));
+            let read_file = Arc::new(Mutex::new(File {
                 inode: inode.clone(),
-                pos: Mutex::new(0),
-                flag: crate::fs::vfs::AccessMode::ReadOnly,
-                ops: PipeOps,
-            };
+                pos: 0,
+                flags: OpenFlags::new(),
+                ops: Arc::new(PipeOps),
+            }));
+
+            with_curr_proc_mut(|p| {
+                let rfd = p.fd.insert(read_file) as u64;
+                let wfd = p.fd.insert(write_file) as u64;
+                let rfd_user = arg1 as *mut u64;
+
+                unsafe {
+                    let wfd_user = rfd_user.add(1);
+                    *rfd_user = rfd;
+                    *wfd_user = wfd;
+                }
+            });
 
             0
         }
