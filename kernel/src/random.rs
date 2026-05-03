@@ -116,6 +116,13 @@ pub fn mix_entropy() {
     }
 }
 
+pub fn mix_entropy_with(val: u64) {
+    let rand_gen = RAND_GEN.get();
+    if let Some(rand_gen) = rand_gen {
+        rand_gen.lock().reseed(val);
+    }
+}
+
 pub fn get_random_number() -> u64 {
     let mutex = RAND_GEN.get().unwrap();
     // avoid deadlocks in interrupt bc of mix_entropy

@@ -1,25 +1,23 @@
 use crate::fs::vfs::find_dentry;
-use crate::fs::vfs::find_parent_dentry;
 use crate::fs::vfs::full_path;
-use crate::fs::vfs::sys_close;
-use crate::fs::vfs::sys_open;
-use crate::fs::vfs::sys_read;
-use crate::fs::vfs::sys_write;
+use crate::fs::vfs::pipe::Pipe;
+use crate::fs::vfs::pipe::PipeInodeOps;
+use crate::fs::vfs::pipe::PipeOps;
+use crate::fs::vfs::pipe::PIPE_FS;
+use crate::fs::vfs::pipe::PIPE_ID_COUNT;
+use crate::fs::vfs::sys::sys_close;
+use crate::fs::vfs::sys::sys_open;
+use crate::fs::vfs::sys::sys_read;
+use crate::fs::vfs::sys::sys_write;
 use crate::fs::vfs::DEntryMinimal;
 use crate::fs::vfs::File;
 use crate::fs::vfs::FsMetadata;
 use crate::fs::vfs::INode;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::Pipe;
-use crate::fs::vfs::PipeInodeOps;
-use crate::fs::vfs::PipeOps;
 use crate::fs::vfs::Stat;
 use crate::fs::vfs::StatusFlags;
-use crate::fs::vfs::PIPE_FS;
-use crate::fs::vfs::PIPE_ID_COUNT;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
-use crate::serial_print;
 use crate::task::proc::with_curr_proc;
 use crate::task::proc::with_curr_proc_mut;
 use crate::task::proc::MAX_FD;
@@ -35,17 +33,14 @@ use crate::UNAME;
 use alloc::ffi::CString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use bitfield_struct::bitfield;
 use common::UserWindow;
 use core::arch::naked_asm;
-use core::ptr::copy_nonoverlapping;
 use core::str::FromStr;
 use core::{
     ffi::{c_char, CStr},
     ptr,
 };
 use crossbeam_queue::ArrayQueue;
-use futures_util::future::Either;
 use spin::Mutex;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
@@ -452,6 +447,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 meta: Mutex::new(FsMetadata {
                     size: 4096,
                     mtime: 0,
+                    dirty: false,
                 }),
                 ops: Arc::new(PipeInodeOps),
             });

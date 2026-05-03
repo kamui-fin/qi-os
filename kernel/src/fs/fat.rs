@@ -28,7 +28,7 @@ use super::vfs;
 
 const EOC: u32 = 0x0FFFFFFF;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(packed, C)]
 pub struct BPB {
     jmp_bytes: [u8; 3],
@@ -85,7 +85,7 @@ pub struct BPB {
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FSInfo {
     lead_signature: u32, // 0x41615252
     reserved_1: [u8; 480],
@@ -184,8 +184,8 @@ bitflags! {
 
 #[derive(Clone)]
 pub struct Fat32<D: BlockDevice> {
-    bpb: Arc<BPB>,
-    fs_info: Arc<FSInfo>,
+    bpb: BPB,
+    fs_info: FSInfo,
     disk: D,
 
     // derived
@@ -280,7 +280,7 @@ impl<D: BlockDevice> Fat32<D> {
         }
     }
 
-    pub fn new(bpb: Arc<BPB>, fs_info: Arc<FSInfo>, disk: D) -> Self {
+    pub fn new(bpb: BPB, fs_info: FSInfo, disk: D) -> Self {
         let fat_start = bpb.reserved_sector_count as u32;
         let data_start = fat_start + (bpb.num_fats as u32 * bpb.fat_size_32) as u32;
 
@@ -870,9 +870,10 @@ impl<D: BlockDevice> Fat32<D> {
             meta: Mutex::new(vfs::FsMetadata {
                 size: dirent.entry.file_size as usize,
                 mtime: 0,
+                dirty: false,
             }),
             mode: vfs::NodeType::Directory,
-            data: INodeData::FatFs(Mutex::new(dirent)),
+            data: INodeData::FatNode(Mutex::new(dirent)),
             ops,
         })
     }
@@ -903,7 +904,7 @@ impl<D: BlockDevice> Fat32<D> {
 
 impl<D: BlockDevice + Sync + Send> FileOps for Fat32<D> {
     fn read(&self, file: &vfs::File, buffer: &mut [u8]) -> usize {
-        let INodeData::FatFs(data) = &file.inode.data else {
+        let INodeData::FatNode(data) = &file.inode.data else {
             panic!("fat32 driver received non-FAT inode {}!", file.inode.inum);
         };
 
@@ -911,7 +912,7 @@ impl<D: BlockDevice + Sync + Send> FileOps for Fat32<D> {
     }
 
     fn write(&self, file: &vfs::File, buffer: &[u8]) -> usize {
-        let INodeData::FatFs(data) = &file.inode.data else {
+        let INodeData::FatNode(data) = &file.inode.data else {
             panic!("fat32 driver received non-FAT inode {}!", file.inode.inum);
         };
         self.write_buffer(&mut data.lock(), file.pos, buffer)
@@ -944,10 +945,11 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
                 meta: Mutex::new(vfs::FsMetadata {
                     size: d.entry.file_size as usize,
                     mtime: 0,
+                    dirty: false,
                 }),
                 mode,
                 ops: parent.ops.clone(),
-                data: vfs::INodeData::FatFs(Mutex::new(d)),
+                data: vfs::INodeData::FatNode(Mutex::new(d)),
             }
         };
 
@@ -959,28 +961,28 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
     }
 
     fn rename(&self, node: &INode, to: &str) {
-        let INodeData::FatFs(data) = &node.data else {
+        let INodeData::FatNode(data) = &node.data else {
             panic!("fat32 driver received non-FAT inode {}!", node.inum);
         };
         self.mv(&mut data.lock(), to);
     }
 
     fn delete_file(&self, file: &INode) {
-        let INodeData::FatFs(data) = &file.data else {
+        let INodeData::FatNode(data) = &file.data else {
             panic!("fat32 driver received non-FAT inode {}!", file.inum);
         };
         self.delete_file(&mut data.lock());
     }
 
     fn mkdir(&self, dir: &INode, name: &str) {
-        let INodeData::FatFs(data) = &dir.data else {
+        let INodeData::FatNode(data) = &dir.data else {
             panic!("fat32 driver received non-FAT inode {}!", dir.inum);
         };
         self.create_dir(&data.lock(), name);
     }
 
     fn rmdir(&self, dir: &INode) {
-        let INodeData::FatFs(data) = &dir.data else {
+        let INodeData::FatNode(data) = &dir.data else {
             panic!("fat32 driver received non-FAT inode {}!", dir.inum);
         };
         self.delete_dir(&mut data.lock());
