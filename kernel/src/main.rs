@@ -157,7 +157,6 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         scheduler.spawn(2, cleaner_task as *const ());
         scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
-        scheduler.spawn(5, random_test as *const ());
         /* let args = [c"test".as_ptr()];
         spawn_proc(c"xiangqi", args.as_ptr(), 1); */
     }
@@ -189,19 +188,11 @@ fn reboot() {
     }
 }
 
-fn random_test() {
-    nano_sleep(1_000_000 * 1000);
-    for _ in 0..100 {
-        serial_print!(" {} ", get_rand_range(1, 30));
-    }
-    terminate_task(0)
-}
-
 fn async_executor_task() {
     let mut executor = Executor::new();
     executor.spawn(Task::new(print_keypresses()));
     executor.spawn(Task::new(print_mouse_movement()));
-    // executor.spawn(Task::new(render_tty_buffer()));
+    executor.spawn(Task::new(render_tty_buffer()));
     executor.run();
 }
 

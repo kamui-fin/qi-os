@@ -89,7 +89,6 @@ impl ConsoleRenderer {
                 buf[0] = character.ascii_character;
                 let string = core::str::from_utf8(&buf).unwrap_or(" ");
 
-                // serial_println!("{string} at ({y}, {x})");
                 Text::new(&string, Point::new(x as i32, y as i32), style)
                     .draw(&mut *screen)
                     .unwrap();
