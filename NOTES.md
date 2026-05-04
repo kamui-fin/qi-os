@@ -1,14 +1,5 @@
 # Roadmap
 
-- devfs
-    - /dev/zero
-    - /dev/null
-    - /dev/urandom
-    - /dev/mouse
-    - /dev/keyboard
-    - /dev/stdin, /dev/stdout, /dev/stderr
-- unit + integration testing setup
-    - Kernel debugger (quit & dump useful info on key press)
 - TTY:
     - tty1: read-only log buffer
         - /dev/console = /dev/tty0
@@ -16,18 +7,24 @@
         - /dev/tty1
 - Shell
     - env var
+- devfs
+    - /dev/mouse
+    - /dev/keyboard
+- unit + integration testing setup
+    - Kernel debugger (quit & dump useful info on key press)
+- Compositing:
+    - Wallpaper
+    - Floating windows
+    - Borders
 
 - buddy + slab allocator
+- wait queues
 - more concurrency:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
 
-- Compositing:
-    - Wallpaper
-    - Floating windows
-    - Borders
 
 Wayyy into future:
 - multiboot support

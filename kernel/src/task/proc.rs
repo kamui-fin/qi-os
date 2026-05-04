@@ -25,7 +25,7 @@ use x86_64::{
     VirtAddr,
 };
 
-use crate::fs::vfs::{get_root_dentry, DEntry, File};
+use crate::fs::vfs::{find_dentry, get_root_dentry, DEntry, File, OpenFlags};
 use crate::task::thread::{CURR_THREAD_PTR, SCHEDULER};
 use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
 use crate::{serial_println, BOOT_INFO, PROC};
@@ -361,8 +361,44 @@ impl<'a> ProcessControlBlock<'a> {
             name: program.to_str().unwrap(),
             backbuffer_frames: None,
             cwd: directory,
-            fd: Slab::with_capacity(MAX_FD),
+            fd: Self::setup_fd(),
         }
+    }
+
+    fn setup_fd() -> Slab<Arc<Mutex<File>>> {
+        let mut fds = Slab::with_capacity(MAX_FD);
+
+        let tty = find_dentry("/dev/tty");
+        let tty = tty.unwrap().read().inode.clone();
+
+        // TODO: actually fill this in
+        let read_flags = OpenFlags::new();
+        let write_flags = OpenFlags::new();
+
+        let stdin_file = Arc::new(Mutex::new(File {
+            inode: tty.clone(),
+            pos: 0,
+            flags: read_flags,
+            ops: tty.ops.open(&tty, read_flags),
+        }));
+        let stdout_file = Arc::new(Mutex::new(File {
+            inode: tty.clone(),
+            pos: 0,
+            flags: write_flags,
+            ops: tty.ops.open(&tty, write_flags),
+        }));
+        let stderr_file = Arc::new(Mutex::new(File {
+            inode: tty.clone(),
+            pos: 0,
+            flags: write_flags,
+            ops: tty.ops.open(&tty, write_flags),
+        }));
+
+        fds[0] = stdin_file;
+        fds[1] = stdout_file;
+        fds[1] = stderr_file;
+
+        fds
     }
 }
 

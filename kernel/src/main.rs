@@ -9,7 +9,6 @@ use alloc::{task, vec};
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use core::ffi::c_char;
-use core::intrinsics::copy_nonoverlapping;
 use core::panic::PanicInfo;
 use crossbeam_queue::ArrayQueue;
 use elf::abi::PT_LOAD;
@@ -24,7 +23,7 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
-use kernel::console::render_tty_buffer;
+use kernel::console::{init_ttys, MLT};
 use kernel::driver::cmos::get_rtc_time;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
@@ -34,7 +33,6 @@ use kernel::mem::allocator::init_heap;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
-use kernel::task::keyboard::print_keypresses;
 use kernel::task::lock::NEEDS_RESCHEDULE;
 use kernel::task::mouse::print_mouse_movement;
 use kernel::task::proc::{ProcessControlBlock, ECHO_ELF};
@@ -43,7 +41,7 @@ use kernel::task::thread::{
     yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
     MAIN_THREAD, SCHEDULER,
 };
-use kernel::task::tty::{init_console_char_queue, Color, ColorCode, ConsoleStream, ScreenChar};
+use kernel::task::tty::init_console_char_queue;
 use kernel::task::Task;
 use kernel::{
     driver::mouse, driver::serial, hlt_loop, init, mem::allocator, mem::memory, println,
@@ -109,6 +107,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         let screen = Screen::new(screen);
         SCREEN.init_once(|| Mutex::new(screen));
 
+        init_ttys();
         init_console_char_queue();
 
         // Xiangqi OS boot message
@@ -157,6 +156,7 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         scheduler.spawn(2, cleaner_task as *const ());
         scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
+        scheduler.spawn(5, render_active_tty as *const ());
         /* let args = [c"test".as_ptr()];
         spawn_proc(c"xiangqi", args.as_ptr(), 1); */
     }
@@ -190,10 +190,16 @@ fn reboot() {
 
 fn async_executor_task() {
     let mut executor = Executor::new();
-    executor.spawn(Task::new(print_keypresses()));
     executor.spawn(Task::new(print_mouse_movement()));
-    executor.spawn(Task::new(render_tty_buffer()));
     executor.run();
+}
+
+fn render_active_tty() {
+    loop {
+        block_task(BlockReason::TtyRenderWait);
+        let mut mlt = MLT.get().unwrap().lock();
+        mlt.paint_active();
+    }
 }
 
 fn compositor_task() {

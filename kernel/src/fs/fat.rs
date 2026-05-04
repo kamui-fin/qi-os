@@ -924,7 +924,7 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
         Arc::new(self.clone())
     }
 
-    fn lookup(&self, parent: &INode, name: &str) -> Option<INode> {
+    fn lookup(&self, parent: &INode, name: &str) -> Option<Arc<INode>> {
         let to_inode = |d: DirEntryWithLoc| {
             let bytes_per_cluster = (self.bpb.sectors_per_cluster as usize) * 512;
             let data_start_bytes = self.data_start as u64 * 512;
@@ -954,7 +954,7 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
         };
 
         let dir = self.find(parent.inum as u32, name);
-        dir.map(|d| to_inode(d))
+        dir.map(|d| Arc::new(to_inode(d)))
     }
     fn create_file(&self, dir: &INode, name: &str) {
         self.create_file(dir.inum as u32, name);
@@ -999,7 +999,7 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
             .iter()
             .map(|e| DEntryMinimal {
                 name: e.entry.name_as_str(),
-                inum: e.entry.first_cluster(),
+                inum: e.entry.first_cluster() as u64,
                 size: e.entry.file_size as usize,
                 filetype: attr_to_node_type(e.entry.attr),
             })

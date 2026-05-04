@@ -1,3 +1,4 @@
+use crate::console::{Color, ColorCode, ScreenChar};
 use crate::driver::serial;
 use conquer_once::spin::OnceCell;
 use core::fmt::{self, Write};
@@ -46,54 +47,6 @@ pub fn _print(args: fmt::Arguments) {
     });
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Color {
-    Black = 0,
-    Blue = 1,
-    Green = 2,
-    Cyan = 3,
-    Red = 4,
-    Magenta = 5,
-    Brown = 6,
-    LightGray = 7,
-    DarkGray = 8,
-    LightBlue = 9,
-    LightGreen = 10,
-    LightCyan = 11,
-    LightRed = 12,
-    Pink = 13,
-    Yellow = 14,
-    White = 15,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct ColorCode(u8);
-
-impl ColorCode {
-    pub fn new(foreground: Color, background: Color) -> ColorCode {
-        ColorCode((background as u8) << 4 | (foreground as u8))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
-pub struct ScreenChar {
-    pub ascii_character: u8,
-    pub color_code: ColorCode,
-}
-
-impl Default for ScreenChar {
-    fn default() -> Self {
-        Self {
-            ascii_character: ' ' as u8,
-            color_code: ColorCode::new(Color::Black, Color::Black),
-        }
-    }
-}
-
 static WAKER: AtomicWaker = AtomicWaker::new();
 
 static CONSOLE_CHAR_QUEUE: OnceCell<ArrayQueue<ScreenChar>> = OnceCell::uninit();
@@ -104,7 +57,7 @@ pub fn init_console_char_queue() {
         .expect("Console queue initialization failed or called twice");
 }
 
-pub fn write_byte(byte: u8) {
+fn write_byte(byte: u8) {
     if let Ok(queue) = CONSOLE_CHAR_QUEUE.try_get() {
         queue.force_push(ScreenChar {
             ascii_character: byte,

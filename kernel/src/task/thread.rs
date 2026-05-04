@@ -37,6 +37,8 @@ pub enum BlockReason {
     CompositorWait,
     WaitPipeRead(u64),
     WaitPipeWrite(u64),
+    WaitStdin(u8),
+    TtyRenderWait,
 }
 
 #[repr(C)]
