@@ -23,7 +23,7 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
-use kernel::console::{init_ttys, MLT};
+use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, MLT};
 use kernel::driver::cmos::get_rtc_time;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
@@ -35,7 +35,7 @@ use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::lock::NEEDS_RESCHEDULE;
 use kernel::task::mouse::print_mouse_movement;
-use kernel::task::proc::{ProcessControlBlock, ECHO_ELF};
+use kernel::task::proc::{spawn_proc, ProcessControlBlock, ECHO_ELF};
 use kernel::task::thread::{
     block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
     yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
@@ -107,8 +107,8 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         let screen = Screen::new(screen);
         SCREEN.init_once(|| Mutex::new(screen));
 
-        init_ttys();
         init_console_char_queue();
+        init_ttys();
 
         // Xiangqi OS boot message
         println!(
@@ -134,8 +134,8 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         println!("[ OK ] Timer setup");
 
         unsafe {
-            mouse::init_ps2();
-            mouse::init_ps2_mouse();
+            // mouse::init_ps2();
+            // mouse::init_ps2_mouse();
         }
         println!("[ OK ] PS/2 Mouse initialized");
 
@@ -150,18 +150,20 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
     PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
 
     init_rand();
+    init_vfs();
+
+    serial_println!("Setup VFS!");
 
     {
         let mut scheduler = SCHEDULER.lock();
         scheduler.spawn(2, cleaner_task as *const ());
         scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
-        scheduler.spawn(5, render_active_tty as *const ());
-        /* let args = [c"test".as_ptr()];
-        spawn_proc(c"xiangqi", args.as_ptr(), 1); */
-    }
+        scheduler.spawn(5, render_tty_task as *const ());
 
-    // init_vfs();
+        let args = [c"test".as_ptr()];
+        spawn_proc(c"xiangqi", args.as_ptr(), 1);
+    }
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
@@ -169,36 +171,21 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
     hlt_loop();
 }
 
-#[repr(C, packed)]
-struct IdtPtr {
-    limit: u16,
-    base: u64,
-}
-
-fn reboot() {
-    let idt = IdtPtr { limit: 0, base: 0 };
-    unsafe {
-        asm!(
-            "cli",
-            "lidt [{0}]",
-            "int3",
-            in(reg) &idt,
-            options(noreturn)
-        );
-    }
-}
-
 fn async_executor_task() {
     let mut executor = Executor::new();
-    executor.spawn(Task::new(print_mouse_movement()));
+    // executor.spawn(Task::new(print_mouse_movement()));
+    executor.spawn(Task::new(handle_keyboard()));
+    executor.spawn(Task::new(listen_console_buffer()));
     executor.run();
 }
 
-fn render_active_tty() {
+fn render_tty_task() {
     loop {
+        serial_println!("Going to sleep");
         block_task(BlockReason::TtyRenderWait);
         let mut mlt = MLT.get().unwrap().lock();
         mlt.paint_active();
+        serial_println!("Done painting");
     }
 }
 
@@ -280,6 +267,25 @@ fn cleaner_task() {
         // After this scope, the task's stack and the TCB itself will automatically be dropped
         // due to Box<T>!
         // No manual kfree required!
+    }
+}
+
+#[repr(C, packed)]
+struct IdtPtr {
+    limit: u16,
+    base: u64,
+}
+
+fn reboot() {
+    let idt = IdtPtr { limit: 0, base: 0 };
+    unsafe {
+        asm!(
+            "cli",
+            "lidt [{0}]",
+            "int3",
+            in(reg) &idt,
+            options(noreturn)
+        );
     }
 }
 

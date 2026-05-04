@@ -18,10 +18,11 @@ use embedded_graphics::{
     text::Text,
     Drawable,
 };
-use userland::println;
 use userland::{
-    get_unix_time, init_heap, syscall_get_backbuffer, syscall_notify_frame_update, syscall_sleep,
+    close, get_unix_time, init_heap, syscall_get_backbuffer, syscall_notify_frame_update,
+    syscall_sleep, write,
 };
+use userland::{open, println};
 
 global_asm!(
     ".section .text._start",
@@ -39,8 +40,6 @@ global_asm!(
 
 #[no_mangle]
 pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
-    println!("Xiangqi INIT");
-
     init_heap();
 
     // let mut display = syscall_get_backbuffer();
@@ -58,9 +57,16 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
 
     // syscall_notify_frame_update();
 
+    let fd = open(c"/dev/tty2");
+    write(fd, "Hello world\n".as_bytes());
+
     loop {
-        syscall_sleep(2 * 1000);
+        syscall_sleep(1000 * 5);
+
+        write(fd, "Yo".as_bytes());
     }
+
+    close(fd);
 
     0
 }

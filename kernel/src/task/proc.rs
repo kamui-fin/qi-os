@@ -25,6 +25,7 @@ use x86_64::{
     VirtAddr,
 };
 
+use crate::driver::serial;
 use crate::fs::vfs::{find_dentry, get_root_dentry, DEntry, File, OpenFlags};
 use crate::task::thread::{CURR_THREAD_PTR, SCHEDULER};
 use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
@@ -368,7 +369,7 @@ impl<'a> ProcessControlBlock<'a> {
     fn setup_fd() -> Slab<Arc<Mutex<File>>> {
         let mut fds = Slab::with_capacity(MAX_FD);
 
-        let tty = find_dentry("/dev/tty");
+        let tty = find_dentry("/dev/tty1");
         let tty = tty.unwrap().read().inode.clone();
 
         // TODO: actually fill this in
@@ -394,9 +395,9 @@ impl<'a> ProcessControlBlock<'a> {
             ops: tty.ops.open(&tty, write_flags),
         }));
 
-        fds[0] = stdin_file;
-        fds[1] = stdout_file;
-        fds[1] = stderr_file;
+        let one = fds.insert(stdin_file);
+        let two = fds.insert(stdout_file);
+        let three = fds.insert(stderr_file);
 
         fds
     }
@@ -438,6 +439,7 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
             panic!("unrecognized program")
         }
     };
+    serial_println!("Spawning process {}", program.to_str().unwrap());
     let proc = ProcessControlBlock::from_bytes(binary, argv, argc, program, get_root_dentry());
     let id = proc.tcb.lock().id;
     let tcb_clone = proc.tcb.clone();

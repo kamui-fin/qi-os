@@ -112,7 +112,7 @@ impl INodeOps for DevFsDir {
     }
 }
 
-pub fn mount_devfs(table: &mut MountTable, mount_path: &str) {
+pub fn mount_devfs() -> Mount {
     let sb = Arc::new(SuperBlock {
         fs_type: FsType::DevFs,
     });
@@ -222,7 +222,7 @@ pub fn mount_devfs(table: &mut MountTable, mount_path: &str) {
         sb: sb.clone(),
     };
 
-    table.insert(mount_path.into(), devfs);
+    devfs
 
     // TODO:
     //     - /dev/mouse

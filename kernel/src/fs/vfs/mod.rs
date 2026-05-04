@@ -29,7 +29,7 @@ use crate::fs::vfs::devfs::mount_devfs;
 use crate::fs::vfs::pipe::Pipe;
 use crate::task::proc::{with_curr_proc, with_curr_proc_mut};
 use crate::task::thread::{block_task, block_task_drop_lock, BlockReason, ThreadState, SCHEDULER};
-use crate::PROC;
+use crate::{serial_println, PROC};
 
 pub static MOUNT_TABLE: OnceCell<MountTable> = OnceCell::uninit();
 
@@ -252,20 +252,22 @@ pub fn full_path(dentry: Arc<RwLock<DEntry>>) -> String {
 }
 
 // NOTE: ensure sanitized to absolute paths before passed to VFS layer
-fn find_mountpoint(path: &str) -> &Mount {
+fn find_mountpoint(path: &str) -> (&Mount, String) {
     let table = MOUNT_TABLE.try_get().unwrap();
     let mut curr_path = path;
+
+    serial_println!("{:#?}", table.keys().collect::<Vec<&String>>());
 
     while !curr_path.is_empty() {
         let last_slash = curr_path.rfind('/').unwrap();
         let (parent, _) = curr_path.split_at(last_slash);
         if let Some(mp) = table.get(parent) {
-            return mp;
+            return (mp, parent.into());
         }
         curr_path = parent;
     }
 
-    table.get("/").unwrap()
+    (table.get("/").unwrap(), "/".into())
 }
 
 pub fn get_root_dentry() -> Arc<RwLock<DEntry>> {
@@ -280,15 +282,14 @@ pub fn find_parent_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
 pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
     // TODO: make sure path is abs or relative, if relative, combine with CWD
     let path = path.trim();
-    let mount = find_mountpoint(path);
+    let (mount, mp_root_path) = find_mountpoint(path);
 
     let mut current = mount.root.clone();
 
-    let mp_root_path = &mount.mountpoint.read().name;
     let rel_path = if mp_root_path == "/" {
         path
     } else {
-        path.strip_prefix(mp_root_path).unwrap_or(path)
+        path.strip_prefix(&mp_root_path).unwrap_or(path)
     };
 
     for segment in rel_path
@@ -384,11 +385,13 @@ pub fn mount_initramfs(table: &mut MountTable, mount_path: &str) {
 
     table.insert(mount_path.into(), ustarfs);
 }
+
 pub fn init_vfs() {
     let mut table: MountTable = MountTable::new();
     mount_fat32(&mut table, "/");
-    mount_initramfs(&mut table, "/init");
-    mount_devfs(&mut table, "/dev");
+    // mount_initramfs(&mut table, "/init");
+
+    table.insert("/dev".into(), mount_devfs());
 
     MOUNT_TABLE.init_once(|| table);
 }

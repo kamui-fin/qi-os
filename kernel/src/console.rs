@@ -12,8 +12,14 @@ use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, Scancod
 use spin::Mutex;
 
 use crate::{
+    driver::serial,
     fs::vfs::FileOps,
-    task::{keyboard::ScancodeStream, thread::SCHEDULER, tty::ConsoleStream},
+    serial_println,
+    task::{
+        keyboard::ScancodeStream,
+        thread::{switch_if_needed, SCHEDULER},
+        tty::ConsoleStream,
+    },
     tty::TTY,
     SCREEN,
 };
@@ -173,13 +179,20 @@ pub struct TtyDeviceHandle {
 impl FileOps for TtyDeviceHandle {
     fn read(&self, _: &crate::fs::vfs::File, buffer: &mut [u8]) -> usize {
         let mlt = MLT.get().unwrap().lock();
-        mlt.ttys[self.tty_id].read(buffer)
+        mlt.ttys[self.tty_id - 1].read(buffer)
     }
 
     fn write(&self, _: &crate::fs::vfs::File, buffer: &[u8]) -> usize {
-        let mlt = MLT.get().unwrap().lock();
+        let mut mlt = MLT.get().unwrap().lock();
         let string = str::from_utf8(buffer).unwrap_or_default();
-        mlt.ttys[self.tty_id].write(string)
+        let bytes_written = mlt.ttys[self.tty_id - 1].write(string);
+
+        if bytes_written > 0 && mlt.active_buffer == self.tty_id {
+            mlt.needs_repaint = true;
+            wake_tty_renderer();
+        }
+
+        bytes_written
     }
 }
 
@@ -198,7 +211,7 @@ impl ConsoleMultiplexer {
         Self {
             ttys,
             kcons: VirtualTerminal::new(),
-            active_buffer: 0,
+            active_buffer: 1,
             needs_repaint: false,
         }
     }
@@ -218,14 +231,20 @@ impl ConsoleMultiplexer {
 
     fn switch(&mut self, index: usize) {
         self.active_buffer = index;
+        self.needs_repaint = true;
     }
 
     fn is_tty_active(&self) -> bool {
         self.active_buffer > 0
     }
 
-    fn handle_key(&self, key: DecodedKey) {
-        self.ttys[self.active_buffer - 1].handle_key(key)
+    fn handle_key(&mut self, key: DecodedKey) -> bool {
+        if self.ttys[self.active_buffer - 1].handle_key(key) {
+            self.needs_repaint = true;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn paint_active(&mut self) {
@@ -261,16 +280,21 @@ pub async fn handle_keyboard() {
     while let Some(scancode) = scancodes.next().await {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(key_event) {
+                serial_println!("Received {:#?}", key);
                 let mut mlt = MLT.get().unwrap().lock();
-
                 // first check if we want to switch terminal multiplexer
                 if let Some(index) = ConsoleMultiplexer::is_switch_tty(key) {
                     mlt.switch(index);
+                    drop(mlt);
+                    wake_tty_renderer();
                     continue;
                 }
 
                 if mlt.is_tty_active() {
-                    mlt.handle_key(key);
+                    if mlt.handle_key(key) {
+                        drop(mlt);
+                        wake_tty_renderer();
+                    }
                 }
             }
         }
@@ -286,14 +310,19 @@ pub async fn listen_console_buffer() {
         while let Some(Some(char)) = console_chars.next().now_or_never() {
             mlt.kcons.write_byte(char.ascii_character);
         }
+
+        if mlt.active_buffer == 0 {
+            mlt.needs_repaint = true;
+            drop(mlt);
+            wake_tty_renderer();
+        }
     }
 }
 
-pub fn mark_repaint_and_wake() {
-    let mut sched = SCHEDULER.lock();
-
-    let mut mlt = MLT.get().unwrap().lock();
-    mlt.needs_repaint = true;
-
-    sched.unblock_task(5);
+pub fn wake_tty_renderer() {
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.unblock_task(5);
+    }
+    switch_if_needed();
 }

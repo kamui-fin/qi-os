@@ -67,7 +67,7 @@ impl Executor {
     fn sleep_if_idle(&self) {
         interrupts::disable();
         if self.task_queue.is_empty() {
-            block_task(crate::task::thread::BlockReason::Paused);
+            enable_and_hlt();
         } else {
             interrupts::enable();
         }
@@ -89,9 +89,6 @@ impl TaskWaker {
 
     fn wake_task(&self) {
         self.task_queue.push(self.task_id).expect("task_queue full");
-
-        let mut sched = SCHEDULER.lock();
-        sched.unblock_task(4);
     }
 }
 

@@ -863,7 +863,20 @@ impl<D: BlockDevice> Fat32<D> {
         ops: Arc<dyn INodeOps>,
         superblock: Arc<SuperBlock>,
     ) -> alloc::sync::Arc<INode> {
-        let dirent = self.get_dir_entry(self.bpb.root_cluster as u64);
+        // in fat32, root doesn't have direntry describing it on disk.
+        let mut root_entry: DirEntry = unsafe { core::mem::zeroed() };
+        let root_cluster = self.bpb.root_cluster;
+        root_entry.first_cluster_low = (root_cluster & 0xFFFF) as u16;
+        root_entry.first_cluster_high = (root_cluster >> 16) as u16;
+        root_entry.attr = DirEntryFlags::FAT_ATTR_DIRECTORY;
+        let dirent = DirEntryWithLoc {
+            entry: root_entry,
+            loc: ClusterOffset {
+                cluster: root_cluster,
+                offset: 0,
+            },
+        };
+
         Arc::new(INode {
             inum: dirent.entry.first_cluster() as u64,
             fs: superblock,
@@ -883,7 +896,7 @@ impl<D: BlockDevice> Fat32<D> {
         // convert to sector offset and read 32 bytes
         let mut buffer = [0; 512];
         let offset = (inum & 0x1FF) as usize;
-        self.disk.read(inum >> 9, 1, &mut buffer);
+        self.disk.read(inum >> 9, 1, &mut buffer).unwrap();
 
         let entry_bytes = &buffer[offset..(offset + 32)];
         let dir = unsafe { core::ptr::read_unaligned(entry_bytes.as_ptr() as *const DirEntry) };
@@ -891,6 +904,9 @@ impl<D: BlockDevice> Fat32<D> {
         // just reorganizing formula
         let bytes_per_cluster = (self.bpb.sectors_per_cluster as u64) * 512;
         let data_start_bytes = self.data_start as u64 * 512;
+        if inum < data_start_bytes {
+            panic!("Underflow imminent! inum: {:#x}, data_start_bytes: {:#x}. Did we request the root dir?", inum, data_start_bytes);
+        }
         let relative_bytes = inum - data_start_bytes;
         let cluster = (relative_bytes / bytes_per_cluster) as u32 + 2;
         let offset = (relative_bytes % bytes_per_cluster) as u32;

@@ -1,10 +1,6 @@
 # Roadmap
 
-- TTY:
-    - tty1: read-only log buffer
-        - /dev/console = /dev/tty0
-    - tty2: normal terminal
-        - /dev/tty1
+- ridiculously slow input delay
 - Shell
     - env var
 - devfs

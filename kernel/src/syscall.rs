@@ -1,3 +1,4 @@
+use crate::driver::serial;
 use crate::fs::vfs::find_dentry;
 use crate::fs::vfs::full_path;
 use crate::fs::vfs::pipe::Pipe;
@@ -232,6 +233,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
     let arg4 = trap_frame.r10;
     let arg5 = trap_frame.r8;
     let arg6 = trap_frame.r9;
+    serial_println!("{:#?}()", kind);
     let return_value: usize = match kind {
         SysCallKind::Open => {
             // arg1: pathname *const c_cstr

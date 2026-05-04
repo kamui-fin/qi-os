@@ -223,10 +223,7 @@ impl Scheduler {
             thread.state = ThreadState::Ready;
             self.ready_queue.push_back(id);
 
-            // If we're currently running idle task OR there's literally no other threads
-            if num_threads == 0 || curr_thread.id == 1 {
-                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
-            }
+            NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
         }
     }
 }

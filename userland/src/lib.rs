@@ -3,16 +3,67 @@
 
 // Syscalls
 
-use core::fmt::{self, Write};
+use core::{
+    ffi::CStr,
+    fmt::{self, Write},
+};
 
 use common::UserWindow;
+
+// open, close, read, write
+pub fn open(path: &CStr) -> u64 {
+    let mut fd: u64 = 0;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 0,
+            in("rdi") path.as_ptr() as u64,
+            lateout("rax") fd
+        );
+    }
+    fd
+}
+
+pub fn close(fd: u64) {
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 1,
+            in("rdi") fd,
+        );
+    };
+}
+
+pub fn read(fd: u64, buffer: &mut [u8]) {
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 2,
+            in("rdi") fd,
+            in("rsi") buffer.as_mut_ptr() as u64,
+            in("rdx") buffer.len(),
+        );
+    }
+}
+
+pub fn write(fd: u64, buffer: &[u8]) {
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 3,
+            in("rdi") fd,
+            in("rsi") buffer.as_ptr() as u64,
+            in("rdx") buffer.len(),
+        );
+    }
+}
 
 pub fn get_unix_time() -> usize {
     let mut timestamp: usize = 0;
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x9,
+            in("rax") 26,
             lateout("rax") timestamp
         );
     }
@@ -24,7 +75,7 @@ pub fn get_pid() -> usize {
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x6,
+            in("rax") 21,
             lateout("rax") pid
         );
     }
@@ -35,7 +86,7 @@ pub fn exit(status: u8) {
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x1,
+            in("rax") 20,
             in("rdi") status as u64,
             options(noreturn)
         );
@@ -49,17 +100,7 @@ pub fn _print(args: fmt::Arguments) {
 }
 
 pub fn sys_print(string: &str) {
-    let ptr = string.as_ptr().addr();
-    let len = string.len();
-
-    unsafe {
-        core::arch::asm!(
-            "int 0x80",
-            in("rax") 0x0,
-            in("rdi") ptr,
-            in("rsi") len,
-        );
-    }
+    write(1, string.as_bytes());
 }
 
 #[macro_export]
@@ -87,7 +128,7 @@ pub fn syscall_get_backbuffer() -> UserWindow {
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x6,
+            in("rax") 24,
             in("rdi") &user_window,
         );
     }
@@ -98,7 +139,7 @@ pub fn syscall_notify_frame_update() {
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x7,
+            in("rax") 25,
         );
     }
 }
@@ -107,7 +148,7 @@ pub fn syscall_sleep(millisec: usize) {
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x8,
+            in("rax") 22,
             in("rdi") millisec
         );
     }
@@ -118,7 +159,7 @@ pub fn sbrk(size: usize) -> usize {
     unsafe {
         core::arch::asm!(
             "int 0x80",
-            in("rax") 0x4,
+            in("rax") 23,
             in("rdi") size,
             lateout("rax") start_addr
         );

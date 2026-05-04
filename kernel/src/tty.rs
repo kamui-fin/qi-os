@@ -6,7 +6,7 @@
 use core::sync::atomic::AtomicBool;
 
 use crate::{
-    console::{Color, ColorCode, ScreenChar, VirtualTerminal},
+    console::{wake_tty_renderer, Color, ColorCode, ScreenChar, VirtualTerminal},
     fs::vfs::FileOps,
     print, serial_print,
     task::{
@@ -59,12 +59,19 @@ impl TTY {
         self.terminal.lock().write_byte(byte);
     }
 
-    pub fn handle_key(&self, key: DecodedKey) {
+    // returns how many bytes were written to output
+    pub fn handle_key(&self, key: DecodedKey) -> bool {
+        // echoing input needs to update tty display
+        let mut wrote_bytes = false;
+
         match key {
             DecodedKey::Unicode(character) => {
                 match character {
                     // ctrl+c
-                    '\u{3}' => {}
+                    '\u{3}' => {
+                        self.write("^C");
+                        wrote_bytes = true;
+                    }
                     // ctrl+d
                     '\u{4}' => {
                         // eof
@@ -77,14 +84,12 @@ impl TTY {
                     }
                     _ => {
                         self.input_byte(character as u8);
-                        self.output_byte(character as u8)
+                        self.output_byte(character as u8);
+                        wrote_bytes = true;
                     }
                 }
             }
             DecodedKey::RawKey(key) => {
-                if let pc_keyboard::KeyCode::LControl | pc_keyboard::KeyCode::RControl = key {
-                    return;
-                }
                 match key {
                     pc_keyboard::KeyCode::Backspace => {
                         // delete last char from line buffer
@@ -93,6 +98,7 @@ impl TTY {
                             // \x08 is moving cursor one back
                             // " " overwrites with space
                             self.write("\x08 \x08");
+                            wrote_bytes = true;
                         }
                     }
                     pc_keyboard::KeyCode::Return => {
@@ -101,11 +107,14 @@ impl TTY {
                         self.output_byte(b'\n');
 
                         self.commit_line();
+                        wrote_bytes = true;
                     }
                     _ => {}
                 }
             }
         }
+
+        wrote_bytes
     }
 
     // for stdout and stderr
@@ -118,6 +127,7 @@ impl TTY {
                 _ => self.output_byte(0xfe),
             }
         }
+
         s.len()
     }
 
