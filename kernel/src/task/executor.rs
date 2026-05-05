@@ -1,4 +1,5 @@
-use crate::task::thread::{block_task, SCHEDULER};
+use crate::serial_println;
+use crate::task::thread::{block_task, BlockReason, SCHEDULER};
 
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -30,7 +31,6 @@ impl Executor {
     }
 
     fn run_ready_tasks(&mut self) {
-        // destructure `self` to avoid borrow checker errors
         let Self {
             tasks,
             task_queue,
@@ -40,7 +40,10 @@ impl Executor {
         while let Some(task_id) = task_queue.pop() {
             let task = match tasks.get_mut(&task_id) {
                 Some(task) => task,
-                None => continue, // task no longer exists
+                None => {
+                    serial_println!("Executor: Task {:?} not found", task_id);
+                    continue;
+                }
             };
             let waker = waker_cache
                 .entry(task_id)
@@ -48,11 +51,11 @@ impl Executor {
             let mut context = Context::from_waker(waker);
             match task.poll(&mut context) {
                 Poll::Ready(()) => {
-                    // task done -> remove it and its cached waker
                     tasks.remove(&task_id);
                     waker_cache.remove(&task_id);
                 }
-                Poll::Pending => {}
+                Poll::Pending => {
+                }
             }
         }
     }
@@ -65,13 +68,15 @@ impl Executor {
     }
 
     fn sleep_if_idle(&self) {
-        interrupts::disable();
         if self.task_queue.is_empty() {
-            enable_and_hlt();
-        } else {
-            interrupts::enable();
+            crate::task::thread::block_task(BlockReason::AsyncExecutorWait);
         }
     }
+}
+
+pub fn wake_executor() {
+    let mut sched = SCHEDULER.lock();
+    sched.unblock_task(4);
 }
 
 struct TaskWaker {
@@ -89,6 +94,7 @@ impl TaskWaker {
 
     fn wake_task(&self) {
         self.task_queue.push(self.task_id).expect("task_queue full");
+        wake_executor();
     }
 }
 

@@ -6,7 +6,6 @@ use core::panic::PanicInfo;
 
 use x86_64::{
     structures::paging::{
-        frame::{PhysFrameRange, PhysFrameRangeInclusive},
         FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
         PhysFrame, Size2MiB, Size4KiB,
     },

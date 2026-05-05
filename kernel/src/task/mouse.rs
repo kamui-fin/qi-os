@@ -82,11 +82,12 @@ pub async fn print_mouse_movement() {
         y = y.clamp(0, screen.height as i32);
 
         let point = Point::new(x as i32, y as i32);
+        serial_println!("{:#?}", point);
 
         // screen.clear(Rgb565::BLACK).unwrap();
-        Circle::new(point, 15)
+        /* Circle::new(point, 15)
             .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
             .draw(&mut *screen)
-            .unwrap();
+            .unwrap(); */
     }
 }

@@ -1,10 +1,13 @@
+use core::fmt::Binary;
+
 use alloc::sync::Arc;
 use conquer_once::spin::OnceCell;
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
-    pixelcolor::Rgb565,
-    prelude::{Point, RgbColor, WebColors},
-    text::Text,
+    pixelcolor::{BinaryColor, Rgb565},
+    prelude::{DrawTarget, Point, Primitive, RgbColor, Size, WebColors},
+    primitives::{PrimitiveStyleBuilder, Rectangle},
+    text::{Baseline, Text, TextStyleBuilder},
     Drawable,
 };
 use futures_util::{FutureExt, StreamExt};
@@ -14,6 +17,7 @@ use spin::Mutex;
 use crate::{
     driver::serial,
     fs::vfs::FileOps,
+    graphics::Screen,
     serial_println,
     task::{
         keyboard::ScancodeStream,
@@ -77,24 +81,34 @@ const BUFFER_WIDTH: usize = 150;
 
 pub struct VirtualTerminal {
     buffer: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
+    needs_full_redraw: bool,
+
     column_position: usize,
+    row_position: usize,
 }
 
 impl VirtualTerminal {
     pub fn new() -> Self {
         Self {
             buffer: [[ScreenChar::default(); BUFFER_WIDTH]; BUFFER_HEIGHT],
+            needs_full_redraw: false,
             column_position: 0,
+            row_position: 0,
         }
     }
     fn new_line(&mut self) {
-        for row in 1..BUFFER_HEIGHT {
-            for col in 0..BUFFER_WIDTH {
-                let character = self.buffer[row][col];
-                self.buffer[row - 1][col] = character;
+        if self.row_position == BUFFER_HEIGHT - 1 {
+            for row in 1..BUFFER_HEIGHT {
+                for col in 0..BUFFER_WIDTH {
+                    let character = self.buffer[row][col];
+                    self.buffer[row - 1][col] = character;
+                }
             }
+            self.clear_row(BUFFER_HEIGHT - 1);
+            self.needs_full_redraw = true;
+        } else {
+            self.row_position += 1;
         }
-        self.clear_row(BUFFER_HEIGHT - 1);
         self.column_position = 0;
     }
 
@@ -112,7 +126,7 @@ impl VirtualTerminal {
                     self.new_line();
                 }
 
-                let row = BUFFER_HEIGHT - 1;
+                let row = self.row_position;
                 let col = self.column_position;
 
                 let default_color = ColorCode::new(Color::Green, Color::Black);
@@ -128,6 +142,22 @@ impl VirtualTerminal {
     fn get(&self, row: usize, col: usize) -> ScreenChar {
         self.buffer[row][col]
     }
+
+    pub fn last_written_pos(&self) -> (usize, usize) {
+        if self.column_position == 0 {
+            if self.row_position == 0 {
+                (0, 0)
+            } else {
+                (self.row_position - 1, BUFFER_WIDTH - 1)
+            }
+        } else {
+            (self.row_position, self.column_position - 1)
+        }
+    }
+
+    fn cursor_pos(&self) -> (usize, usize) {
+        (self.row_position, self.column_position)
+    }
 }
 
 impl Default for VirtualTerminal {
@@ -139,9 +169,22 @@ impl Default for VirtualTerminal {
 struct ConsoleRenderer;
 
 impl ConsoleRenderer {
-    pub fn paint(terminal: &VirtualTerminal) {
+    pub fn paint_full(terminal: &VirtualTerminal) {
         let mut screen = SCREEN.get().unwrap().lock();
+        screen.clear(Rgb565::BLACK);
 
+        // Self::paint_cursor(&mut screen, terminal.row_position, terminal.column_position);
+
+        for row in 0..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
+                Self::paint_char(terminal, &mut screen, row, col);
+            }
+        }
+
+        screen.flush();
+    }
+
+    fn paint_char(vt: &VirtualTerminal, screen: &mut Screen, row: usize, col: usize) {
         let line_height = 3;
         let font = &FONT_10X20;
 
@@ -151,24 +194,48 @@ impl ConsoleRenderer {
             .background_color(Rgb565::BLACK)
             .build();
 
-        for row in 0..BUFFER_HEIGHT {
-            for col in 0..BUFFER_WIDTH {
-                let y = row * (font.character_size.height + line_height) as usize;
-                let x = col * (font.character_size.width + font.character_spacing) as usize;
+        let y = row * (font.character_size.height + line_height) as usize;
+        let x = col * (font.character_size.width + font.character_spacing) as usize;
 
-                let character = terminal.get(row, col);
+        // padding
+        let x = x + 20;
+        let y = y + 20;
 
-                let mut buf = [0u8; 1];
-                buf[0] = character.ascii_character;
-                let string = core::str::from_utf8(&buf).unwrap_or(" ");
+        let character = vt.get(row, col);
+        let printable_char = if character.ascii_character < 32 || character.ascii_character == 127 {
+            b' '
+        } else {
+            character.ascii_character
+        };
 
-                Text::new(&string, Point::new(x as i32, y as i32), style)
-                    .draw(&mut *screen)
-                    .unwrap();
-            }
-        }
+        let mut buf = [0u8; 1];
+        buf[0] = printable_char;
+        let string = core::str::from_utf8(&buf).unwrap_or(" ");
 
-        screen.flush();
+        let text_style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+
+        Text::with_text_style(&string, Point::new(x as i32, y as i32), style, text_style)
+            .draw(&mut *screen)
+            .unwrap();
+    }
+
+    fn paint_cursor(screen: &mut Screen, row: usize, col: usize) {
+        let line_height = 3;
+        let font = &FONT_10X20;
+
+        let y = row * (font.character_size.height + line_height) as usize;
+        let x = col * (font.character_size.width + font.character_spacing) as usize;
+
+        let x = x + 20;
+        let y = y + 20;
+
+        let style = PrimitiveStyleBuilder::new()
+            .fill_color(Rgb565::GREEN)
+            .build();
+
+        Rectangle::new(Point::new(x as i32, y as i32), font.character_size)
+            .into_styled(style)
+            .draw(screen);
     }
 }
 
@@ -202,6 +269,7 @@ pub struct ConsoleMultiplexer {
     pub active_buffer: usize,
 
     needs_repaint: bool,
+    last_cursor_pos: (usize, usize),
 }
 
 impl ConsoleMultiplexer {
@@ -212,7 +280,8 @@ impl ConsoleMultiplexer {
             ttys,
             kcons: VirtualTerminal::new(),
             active_buffer: 1,
-            needs_repaint: false,
+            needs_repaint: true,
+            last_cursor_pos: (0, 0),
         }
     }
 
@@ -232,6 +301,12 @@ impl ConsoleMultiplexer {
     fn switch(&mut self, index: usize) {
         self.active_buffer = index;
         self.needs_repaint = true;
+
+        if index == 0 {
+            self.kcons.needs_full_redraw = true;
+        } else {
+            self.ttys[index - 1].terminal.lock().needs_full_redraw = true;
+        }
     }
 
     fn is_tty_active(&self) -> bool {
@@ -258,7 +333,25 @@ impl ConsoleMultiplexer {
             &mut self.kcons
         };
 
-        ConsoleRenderer::paint(vt);
+        if vt.needs_full_redraw {
+            ConsoleRenderer::paint_full(vt);
+            vt.needs_full_redraw = false;
+            self.last_cursor_pos = vt.cursor_pos();
+        } else {
+            let mut screen = SCREEN.get().unwrap().lock();
+
+            let (old_r, old_c) = self.last_cursor_pos;
+            ConsoleRenderer::paint_char(vt, &mut screen, old_r, old_c);
+
+            let (r, c) = vt.last_written_pos();
+            ConsoleRenderer::paint_char(vt, &mut screen, r, c);
+
+            let (r, c) = vt.cursor_pos();
+            ConsoleRenderer::paint_cursor(&mut screen, r, c);
+
+            self.last_cursor_pos = (r, c);
+            screen.flush();
+        }
 
         self.needs_repaint = false;
     }
@@ -271,6 +364,7 @@ pub fn init_ttys() {
 }
 
 pub async fn handle_keyboard() {
+    serial_println!("Spawned keyboard task");
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = Keyboard::new(
         ScancodeSet1::new(),
@@ -306,9 +400,15 @@ pub async fn listen_console_buffer() {
     while let Some(char) = console_chars.next().await {
         let mut mlt = MLT.get().unwrap().lock();
         mlt.kcons.write_byte(char.ascii_character);
+        let mut batch = 1;
         // flush rest of queue
         while let Some(Some(char)) = console_chars.next().now_or_never() {
             mlt.kcons.write_byte(char.ascii_character);
+            batch += 1;
+        }
+
+        if batch > 1 {
+            mlt.kcons.needs_full_redraw = true;
         }
 
         if mlt.active_buffer == 0 {
@@ -320,9 +420,6 @@ pub async fn listen_console_buffer() {
 }
 
 pub fn wake_tty_renderer() {
-    {
-        let mut sched = SCHEDULER.lock();
-        sched.unblock_task(5);
-    }
-    switch_if_needed();
+    let mut sched = SCHEDULER.lock();
+    sched.unblock_task(5);
 }

@@ -113,18 +113,18 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         // Xiangqi OS boot message
         println!(
             r#"
-$$\   $$\ $$\                                $$$$$$\  $$\        $$$$$$\   $$$$$$\  
-$$ |  $$ |\__|                              $$  __$$\ \__|      $$  __$$\ $$  __$$\ 
-\$$\ $$  |$$\  $$$$$$\  $$$$$$$\   $$$$$$\  $$ /  $$ |$$\       $$ /  $$ |$$ /  \__|
- \$$$$  / $$ | \____$$\ $$  __$$\ $$  __$$\ $$ |  $$ |$$ |      $$ |  $$ |\$$$$$$\  
- $$  $$<  $$ | $$$$$$$ |$$ |  $$ |$$ /  $$ |$$ |  $$ |$$ |      $$ |  $$ | \____$$\ 
-$$  /\$$\ $$ |$$  __$$ |$$ |  $$ |$$ |  $$ |$$ $$\$$ |$$ |      $$ |  $$ |$$\   $$ |
-$$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$$  |
-\__|  \__|\__| \_______|\__|  \__| \____$$ | \___$$$\ \__|       \______/  \______/ 
-                                  $$\   $$ |     \___|                              
-                                  \$$$$$$  |                                        
-                                   \______/                                         
-        "#
+        $$\   $$\ $$\                                $$$$$$\  $$\        $$$$$$\   $$$$$$\
+        $$ |  $$ |\__|                              $$  __$$\ \__|      $$  __$$\ $$  __$$\
+        \$$\ $$  |$$\  $$$$$$\  $$$$$$$\   $$$$$$\  $$ /  $$ |$$\       $$ /  $$ |$$ /  \__|
+         \$$$$  / $$ | \____$$\ $$  __$$\ $$  __$$\ $$ |  $$ |$$ |      $$ |  $$ |\$$$$$$\
+         $$  $$<  $$ | $$$$$$$ |$$ |  $$ |$$ /  $$ |$$ |  $$ |$$ |      $$ |  $$ | \____$$\
+        $$  /\$$\ $$ |$$  __$$ |$$ |  $$ |$$ |  $$ |$$ $$\$$ |$$ |      $$ |  $$ |$$\   $$ |
+        $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$$  |
+        \__|  \__|\__| \_______|\__|  \__| \____$$ | \___$$$\ \__|       \______/  \______/
+                                          $$\   $$ |     \___|
+                                          \$$$$$$  |
+                                           \______/
+                "#
         );
         println!("[ OK ] Heap initialized");
 
@@ -134,8 +134,8 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
         println!("[ OK ] Timer setup");
 
         unsafe {
-            // mouse::init_ps2();
-            // mouse::init_ps2_mouse();
+            mouse::init_ps2();
+            mouse::init_ps2_mouse();
         }
         println!("[ OK ] PS/2 Mouse initialized");
 
@@ -143,8 +143,6 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
             MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
             CURR_THREAD_PTR = MAIN_THREAD;
         }
-
-        x86_64::instructions::interrupts::enable();
     }
 
     PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
@@ -168,12 +166,13 @@ $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
 
+    x86_64::instructions::interrupts::enable();
     hlt_loop();
 }
 
 fn async_executor_task() {
     let mut executor = Executor::new();
-    // executor.spawn(Task::new(print_mouse_movement()));
+    executor.spawn(Task::new(print_mouse_movement()));
     executor.spawn(Task::new(handle_keyboard()));
     executor.spawn(Task::new(listen_console_buffer()));
     executor.run();
@@ -181,11 +180,11 @@ fn async_executor_task() {
 
 fn render_tty_task() {
     loop {
-        serial_println!("Going to sleep");
+        serial_println!("[tty renderer] Going to sleep");
         block_task(BlockReason::TtyRenderWait);
         let mut mlt = MLT.get().unwrap().lock();
         mlt.paint_active();
-        serial_println!("Done painting");
+        serial_println!("[tty renderer] Done painting");
     }
 }
 

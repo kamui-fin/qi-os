@@ -39,6 +39,7 @@ pub enum BlockReason {
     WaitPipeWrite(u64),
     WaitStdin(u8),
     TtyRenderWait,
+    AsyncExecutorWait,
 }
 
 #[repr(C)]
@@ -188,7 +189,7 @@ impl Scheduler {
                 .find(|t| t.lock().id == next_id)
                 .expect("thread not found")
                 .lock();
-            serial_println!("Switching to {}", next_thread.id);
+            // serial_println!("Switching to {}", next_thread.id);
             next_thread.state = ThreadState::Running;
 
             Some(&mut *next_thread as *mut ThreadControlBlock)

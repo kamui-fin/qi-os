@@ -169,6 +169,7 @@ pub unsafe fn init_ps2() {
        - disable mouse clock bit5 = 0
     5. Write config back (0x60)
     6. Enable second port (0xA8) */
+
     write(0x64, 0xAD); // disable keyboard port
     write(0x64, 0xA7); // disable mouse port
     flush_output_buffer();
@@ -182,7 +183,7 @@ pub unsafe fn init_ps2() {
     write(0x64, 0xA8); // enable mouse port
 
     write(0x64, 0x20);
-    let data = (read(0x60).unwrap() | (1 << 1)) & !(1 << 5);
+    let data = (read(0x60).unwrap() | (1 << 0) | (1 << 1)) & !(1 << 5);
     write(0x64, 0x60);
     write(0x60, data);
 }

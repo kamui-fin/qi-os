@@ -1,18 +1,15 @@
 # Roadmap
 
-- ridiculously slow input delay
+- ridiculously slow paint_full()
 - Shell
     - env var
+
 - devfs
     - /dev/mouse
     - /dev/keyboard
+
 - unit + integration testing setup
     - Kernel debugger (quit & dump useful info on key press)
-- Compositing:
-    - Wallpaper
-    - Floating windows
-    - Borders
-
 - buddy + slab allocator
 - wait queues
 - more concurrency:
@@ -21,6 +18,10 @@
     - mutex / semaphore APIs
     - pthreads API + TLS
 
+- Compositing:
+    - Wallpaper
+    - Floating windows
+    - Borders
 
 Wayyy into future:
 - multiboot support

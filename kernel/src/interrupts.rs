@@ -174,40 +174,13 @@ static mut ps2_mouse_state: MouseDataState = MouseDataState::WaitingForByte1;
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     mix_entropy();
-    // i'm just lazy rn will refactor this massive unsafe block later
     unsafe {
         let mut status_port = Port::<u8>::new(0x64);
         let mut status = status_port.read();
         while status & 0x1 != 0 {
             let mut data_port = Port::<u8>::new(0x60);
-            let mouse_in = data_port.read();
-            if status & (1 << 5) != 0 {
-                match ps2_mouse_state {
-                    MouseDataState::WaitingForByte1 => {
-                        ps2_mouse_state = MouseDataState::WaitingForByte2(mouse_in);
-                    }
-                    MouseDataState::WaitingForByte2(first_byte) => {
-                        ps2_mouse_state = MouseDataState::WaitingForByte3(first_byte, mouse_in);
-                    }
-                    MouseDataState::WaitingForByte3(first_byte, second_byte) => {
-                        // we have the full data now
-                        let packet = [first_byte, second_byte, mouse_in];
-                        let packet = GenericPs2Packet::new(packet);
-
-                        // *   The top two bits of the first byte (values 0x80 and 0x40) supposedly show Y and X overflows,
-                        if first_byte & 0x80 != 0 || first_byte & 0x40 != 0 {
-                            // discard the packet
-                        } else {
-                            // send packet to ring buffer
-                            crate::task::mouse::add_packet(packet);
-                        }
-
-                        /* Bit number 4 of the first byte (value 0x10) indicates that delta X (the 2nd byte) is a negative number, if it is set. This means that you should OR 0xFFFFFF00 onto the value of delta X, as a sign extension (if using 32 bits).
-                        The bottom 3 bits of the first byte indicate whether the middle, right, or left mouse buttons are currently being held down, if the respective bit is set. Middle = bit 2 (value=4), right = bit 1 (value=2), left = bit 0 (value=1). */
-                        ps2_mouse_state = MouseDataState::WaitingForByte1;
-                    }
-                }
-            }
+            let data = data_port.read();
+            handle_ps2_byte(status, data);
             status = status_port.read();
         }
     }
@@ -220,29 +193,48 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     mix_entropy();
-
-    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
-    use spin::Mutex;
-    use x86_64::instructions::port::Port;
-
-    lazy_static! {
-        static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
-            Mutex::new(Keyboard::new(
-                ScancodeSet1::new(),
-                layouts::Us104Key,
-                HandleControl::Ignore
-            ));
+    unsafe {
+        let mut status_port = Port::<u8>::new(0x64);
+        let mut status = status_port.read();
+        while status & 0x1 != 0 {
+            let mut data_port = Port::<u8>::new(0x60);
+            let data = data_port.read();
+            handle_ps2_byte(status, data);
+            status = status_port.read();
+        }
     }
-
-    let mut keyboard = KEYBOARD.lock();
-    let mut port = Port::<u8>::new(0x60);
-
-    let scancode: u8 = unsafe { port.read() };
-    crate::task::keyboard::add_scancode(scancode);
 
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+fn handle_ps2_byte(status: u8, data: u8) {
+    if status & (1 << 5) != 0 {
+        unsafe {
+            match ps2_mouse_state {
+                MouseDataState::WaitingForByte1 => {
+                    ps2_mouse_state = MouseDataState::WaitingForByte2(data);
+                }
+                MouseDataState::WaitingForByte2(first_byte) => {
+                    ps2_mouse_state = MouseDataState::WaitingForByte3(first_byte, data);
+                }
+                MouseDataState::WaitingForByte3(first_byte, second_byte) => {
+                    let packet = [first_byte, second_byte, data];
+                    let packet = GenericPs2Packet::new(packet);
+
+                    if first_byte & 0x80 != 0 || first_byte & 0x40 != 0 {
+                        // discard the packet
+                    } else {
+                        crate::task::mouse::add_packet(packet);
+                    }
+                    ps2_mouse_state = MouseDataState::WaitingForByte1;
+                }
+            }
+        }
+    } else {
+        crate::task::keyboard::add_scancode(data);
     }
 }
 

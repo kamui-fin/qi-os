@@ -57,16 +57,11 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
 
     // syscall_notify_frame_update();
 
-    let fd = open(c"/dev/tty2");
-    write(fd, "Hello world\n".as_bytes());
-
+    // println!("Hello World!");
     loop {
         syscall_sleep(1000 * 5);
-
-        write(fd, "Yo".as_bytes());
+        // println!("I'm awake now!");
     }
-
-    close(fd);
 
     0
 }
