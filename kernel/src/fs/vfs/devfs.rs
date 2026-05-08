@@ -174,20 +174,6 @@ pub fn mount_devfs() -> Mount {
             ops: Arc::new(TtyDeviceHandle { tty_id: 1 }),
         }),
     });
-    let tty_two_inode = Arc::new(INode {
-        inum: 4,
-        fs: sb.clone(),
-        mode: NodeType::CharDevice,
-        data: INodeData::Device { major: 4, minor: 0 },
-        meta: Mutex::new(FsMetadata {
-            size: 0,
-            mtime: 0,
-            dirty: false,
-        }),
-        ops: Arc::new(Device {
-            ops: Arc::new(TtyDeviceHandle { tty_id: 2 }),
-        }),
-    });
 
     let mut devnode_map = BTreeMap::new();
     devnode_map.insert("zero".to_string(), zero_inode);
@@ -195,7 +181,6 @@ pub fn mount_devfs() -> Mount {
     devnode_map.insert("urandom".to_string(), rand_inode);
 
     devnode_map.insert("tty1".to_string(), tty_one_inode);
-    devnode_map.insert("tty2".to_string(), tty_two_inode);
 
     let root_inode = Arc::new(INode {
         inum: 0,

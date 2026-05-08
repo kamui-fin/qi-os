@@ -1,13 +1,7 @@
 # Roadmap
 
-- ridiculously slow paint_full()
 - Shell
     - env var
-
-- devfs
-    - /dev/mouse
-    - /dev/keyboard
-
 - unit + integration testing setup
     - Kernel debugger (quit & dump useful info on key press)
 - buddy + slab allocator
@@ -18,12 +12,14 @@
     - mutex / semaphore APIs
     - pthreads API + TLS
 
-- Compositing:
-    - Wallpaper
-    - Floating windows
-    - Borders
 
 Wayyy into future:
+- sound
+- advanced compositor:
+    - wallpaper
+    - floating windows
+    - borders
+    - workspaces
 - multiboot support
 - port doom
 - UNIX System V IPC
@@ -31,5 +27,4 @@ Wayyy into future:
 - filesystem buffering
 - more advanced scheduler
 - stack smash protector
-- Sound
 - TCP/IP stack

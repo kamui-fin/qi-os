@@ -1,10 +1,11 @@
-use core::ptr::copy_nonoverlapping;
+use core::{ops::RangeBounds, ptr::copy_nonoverlapping};
 
 use alloc::vec;
 use alloc::vec::Vec;
 use embedded_graphics::{
     pixelcolor::{raw::ToBytes, Rgb565},
-    prelude::{OriginDimensions, Point, RgbColor, Size},
+    prelude::{Dimensions, OriginDimensions, Point, PointsIter, RgbColor, Size},
+    primitives::Rectangle,
     Pixel,
 };
 
@@ -90,6 +91,18 @@ impl Screen {
         pixel_buffer[0] = bytes[0];
         pixel_buffer[1] = bytes[1];
     }
+
+    pub fn scroll(&mut self, height: usize) {
+        let bf: &mut [u16] = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.back_lfb.as_mut_ptr() as *mut u16,
+                self.back_lfb.len() / 2,
+            )
+        };
+
+        let width_num_pixels = (self.bytes_per_line / 2) as usize;
+        bf.copy_within((width_num_pixels * height).., 0);
+    }
 }
 
 impl embedded_graphics::draw_target::DrawTarget for Screen {
@@ -108,15 +121,121 @@ impl embedded_graphics::draw_target::DrawTarget for Screen {
         Ok(())
     }
 
-    /* fn fill_contiguous<I>(&mut self, area: &Rectangle, colors: I) -> Result<(), Self::Error>
+    fn fill_contiguous<I>(&mut self, area: &Rectangle, colors: I) -> Result<(), Self::Error>
     where
         I: IntoIterator<Item = Self::Color>,
     {
+        // every time char prints it calls
+        // total of like 1000s of times
+        // still very slow
+        let drawable_area = area.intersection(&self.bounding_box());
+
+        if drawable_area.size == Size::zero() {
+            return Ok(());
+        }
+
+        // TODO: refactor (problem was that map with and without filter are two diff types)
+        if drawable_area != *area {
+            let mut colors_iter = area
+                .points()
+                .zip(colors)
+                .filter(|(pos, _color)| drawable_area.contains(*pos))
+                .map(|(_, color)| u16::from_le_bytes(color.to_le_bytes()));
+
+            let bf: &mut [u16] = unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.back_lfb.as_mut_ptr() as *mut u16,
+                    self.back_lfb.len() / 2,
+                )
+            };
+            let width = drawable_area.size.width as usize;
+            for y in drawable_area.rows() {
+                let x = drawable_area.columns().start;
+                let byte_offset = {
+                    let line_offset = y as u32 * self.bytes_per_line / 2;
+                    line_offset + (x as u32 * self.bytes_per_pixel / 2)
+                } as usize;
+
+                let row_slice = &mut bf[byte_offset..(byte_offset + width)];
+                for (pixel, color) in row_slice.iter_mut().zip(&mut colors_iter) {
+                    *pixel = color;
+                }
+            }
+        } else {
+            let mut colors_iter = area
+                .points()
+                .zip(colors)
+                .map(|(_, color)| u16::from_le_bytes(color.to_le_bytes()));
+
+            let bf: &mut [u16] = unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.back_lfb.as_mut_ptr() as *mut u16,
+                    self.back_lfb.len() / 2,
+                )
+            };
+            let width = drawable_area.size.width as usize;
+            for y in drawable_area.rows() {
+                let x = drawable_area.columns().start;
+                let byte_offset = {
+                    let line_offset = y as u32 * self.bytes_per_line / 2;
+                    line_offset + (x as u32 * self.bytes_per_pixel / 2)
+                } as usize;
+
+                let row_slice = &mut bf[byte_offset..(byte_offset + width)];
+                for (pixel, color) in row_slice.iter_mut().zip(&mut colors_iter) {
+                    *pixel = color;
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {}
+    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
+        // x: top left
+        // x--------------
+        // |             |
+        // |             |
+        // |             |
+        // ---------------
+        //
+        // only guarenteed contiguous areas are each row of rectangle
+        // so we just want to memset row by row?
+        let drawable_area = area.intersection(&self.bounding_box());
+        if drawable_area.size == Size::zero() {
+            return Ok(());
+        }
 
-    fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {} */
+        let color = u16::from_le_bytes(color.to_le_bytes());
+        let bf: &mut [u16] = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.back_lfb.as_mut_ptr() as *mut u16,
+                self.back_lfb.len() / 2,
+            )
+        };
+
+        let width = drawable_area.size.width as usize;
+        for y in drawable_area.rows() {
+            let x = drawable_area.columns().start;
+            let byte_offset = {
+                let line_offset = y as u32 * self.bytes_per_line / 2;
+                line_offset + (x as u32 * self.bytes_per_pixel / 2)
+            } as usize;
+            bf[byte_offset..(byte_offset + width)].fill(color);
+        }
+
+        Ok(())
+    }
+
+    fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
+        let color = u16::from_le_bytes(color.to_le_bytes());
+        // u16 must start on even addr
+        let (_, mid, _) = unsafe { self.back_lfb.align_to_mut::<u16>() };
+
+        mid.fill(color);
+
+        Ok(())
+    }
 }
 
 impl OriginDimensions for Screen {

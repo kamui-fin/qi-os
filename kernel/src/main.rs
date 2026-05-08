@@ -23,7 +23,7 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
-use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, MLT};
+use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, CONS};
 use kernel::driver::cmos::get_rtc_time;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
@@ -165,6 +165,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
+    println!(" ========================================================\n");
 
     x86_64::instructions::interrupts::enable();
     hlt_loop();
@@ -182,19 +183,19 @@ fn render_tty_task() {
     loop {
         serial_println!("[tty renderer] Going to sleep");
         block_task(BlockReason::TtyRenderWait);
-        let mut mlt = MLT.get().unwrap().lock();
-        mlt.paint_active();
+        let mut cons = CONS.get().unwrap().lock();
+        cons.paint();
         serial_println!("[tty renderer] Done painting");
     }
 }
 
 fn compositor_task() {
     // paint wallpaper (z-index 0)
-    /* {
+    {
         let mut screen = SCREEN.get().unwrap().lock();
-        screen.clear(Rgb565::new(5, 10, 5)).unwrap();
+        screen.clear(Rgb565::new(3, 6, 3)).unwrap();
         screen.flush();
-    } */
+    }
 
     loop {
         // Wait for a commit_frame() syscall
