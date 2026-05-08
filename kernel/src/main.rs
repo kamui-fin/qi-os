@@ -35,7 +35,7 @@ use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::lock::NEEDS_RESCHEDULE;
 use kernel::task::mouse::print_mouse_movement;
-use kernel::task::proc::{spawn_proc, ProcessControlBlock, ECHO_ELF};
+use kernel::task::proc::{spawn_proc, ProcessControlBlock};
 use kernel::task::thread::{
     block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
     yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
@@ -158,16 +158,19 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
         scheduler.spawn(5, render_tty_task as *const ());
-
-        let args = [c"test".as_ptr()];
-        spawn_proc(c"xiangqi", args.as_ptr(), 1);
     }
 
     println!("[ OK ] Started threads + async executor");
     println!("Ready!");
-    println!(" ========================================================\n");
+    println!("========================================================\n");
 
     x86_64::instructions::interrupts::enable();
+
+    {
+        let args = [c"test".as_ptr()];
+        spawn_proc(c"shell", args.as_ptr(), 1);
+    }
+
     hlt_loop();
 }
 

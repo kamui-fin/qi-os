@@ -17,6 +17,7 @@ use crate::fs::vfs::INode;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::Stat;
 use crate::fs::vfs::StatusFlags;
+use crate::interrupts;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
 use crate::task::proc::with_curr_proc;
@@ -98,7 +99,11 @@ pub unsafe extern "C" fn syscall_entry() {
             push R15
 
             mov rdi, rsp
+
+            mov rbp, rsp
+            and rsp, -16
             call {}
+            mov rsp, rbp
 
             pop R15
             pop R14
@@ -226,6 +231,8 @@ enum FcntlCommand {
 }
 
 extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
+    x86_64::instructions::interrupts::enable();
+
     let kind = SysCallKind::from(trap_frame.rax);
     let arg1 = trap_frame.rdi;
     let arg2 = trap_frame.rsi;
@@ -249,6 +256,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd (u64)
             // arg2: buffer *mut u8
             // arg3: len (usize)
+            serial_println!("Reading from {} {}", arg1, arg3);
             let buffer = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3) };
             sys_read(arg1 as u64, buffer);
             0

@@ -8,7 +8,7 @@ use core::sync::atomic::AtomicBool;
 use crate::{
     console::{wake_tty_renderer, Color, ColorCode, ScreenChar, VirtualTerminal},
     fs::vfs::FileOps,
-    print, serial_print,
+    print, serial_print, serial_println,
     task::{
         keyboard::ScancodeStream,
         thread::{block_task, BlockReason, ThreadState, SCHEDULER},
@@ -22,6 +22,9 @@ use crossbeam_queue::ArrayQueue;
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 use spin::Mutex;
+
+// TODO:
+// - Backspace
 
 // For now, we'll only support canonical mode
 // - buffered until enter
@@ -67,6 +70,25 @@ impl TTY {
         match key {
             DecodedKey::Unicode(character) => {
                 match character {
+                    '\u{8}' => {
+                        // delete last char from line buffer
+                        if let Some(_) = self.line_buf.lock().pop() {
+                            // append \b \b to output (visual deletion)
+                            // \x08 is moving cursor one back
+                            // " " overwrites with space
+                            self.write("\x08 \x08");
+                            wrote_bytes = true;
+                        }
+                    }
+                    '\n' => {
+                        // \n - done with line
+                        serial_println!("Done with line!");
+                        self.input_byte(b'\n');
+                        self.output_byte(b'\n');
+
+                        self.commit_line();
+                        wrote_bytes = true;
+                    }
                     // ctrl+c
                     '\u{3}' => {
                         self.write("^C");
@@ -89,29 +111,9 @@ impl TTY {
                     }
                 }
             }
-            DecodedKey::RawKey(key) => {
-                match key {
-                    pc_keyboard::KeyCode::Backspace => {
-                        // delete last char from line buffer
-                        if let Some(_) = self.line_buf.lock().pop() {
-                            // append \b \b to output (visual deletion)
-                            // \x08 is moving cursor one back
-                            // " " overwrites with space
-                            self.write("\x08 \x08");
-                            wrote_bytes = true;
-                        }
-                    }
-                    pc_keyboard::KeyCode::Return => {
-                        // \n - done with line
-                        self.input_byte(b'\n');
-                        self.output_byte(b'\n');
-
-                        self.commit_line();
-                        wrote_bytes = true;
-                    }
-                    _ => {}
-                }
-            }
+            DecodedKey::RawKey(key) => match key {
+                _ => {}
+            },
         }
 
         wrote_bytes
@@ -120,12 +122,7 @@ impl TTY {
     // for stdout and stderr
     pub fn write(&self, s: &str) -> usize {
         for byte in s.bytes() {
-            match byte {
-                // printable ASCII byte or newline
-                0x20..=0x7e | b'\n' => self.output_byte(byte),
-                // not part of printable ASCII range
-                _ => self.output_byte(0xfe),
-            }
+            self.output_byte(byte);
         }
 
         s.len()
@@ -146,6 +143,9 @@ impl TTY {
             // wake me up when you commit line
             block_task(BlockReason::WaitStdin(self.id));
         }
+
+        // FIXME: we never get here?
+        serial_println!("Actually starting to read");
 
         let mut i = 0;
         while let Some(c) = self.completed_input_queue.pop() {
@@ -169,15 +169,24 @@ impl TTY {
 
     // TODO: very primitive, switch to wait queue ASAP
     fn wakeup_readers(&self) {
-        let mut sched = SCHEDULER.lock();
-        let procs = PROC.get().unwrap().lock();
-        for proc in procs.iter() {
-            let thread = proc.tcb.lock();
-            if let ThreadState::Blocked(BlockReason::WaitStdin(tty_num)) = thread.state {
-                if self.id == tty_num {
-                    sched.unblock_task(thread.id);
+        let readers_to_wake = {
+            let mut threads = Vec::new();
+
+            let procs = PROC.get().unwrap().lock();
+            for proc in procs.iter() {
+                let thread = proc.tcb.lock();
+                if let ThreadState::Blocked(BlockReason::WaitStdin(tty_num)) = thread.state {
+                    if self.id == tty_num {
+                        threads.push(thread.id);
+                    }
                 }
             }
+
+            threads
+        };
+        for id in readers_to_wake {
+            let mut sched = SCHEDULER.lock();
+            sched.unblock_task(id);
         }
     }
 }

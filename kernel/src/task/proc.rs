@@ -31,7 +31,7 @@ use crate::task::thread::{CURR_THREAD_PTR, SCHEDULER};
 use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
 use crate::{serial_println, BOOT_INFO, PROC};
 
-pub static ECHO_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_echo"));
+pub static SHELL_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_shell"));
 pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xiangqi"));
 
 pub static PID: AtomicU64 = AtomicU64::new(1 << 16);
@@ -433,7 +433,7 @@ where
 
 pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char, argc: usize) {
     let binary = match program.to_str().unwrap() {
-        "echo" => ECHO_ELF,
+        "shell" => SHELL_ELF,
         "xiangqi" => XIANGQI_ELF,
         _ => {
             panic!("unrecognized program")

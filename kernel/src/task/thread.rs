@@ -216,15 +216,13 @@ impl Scheduler {
     }
 
     pub fn unblock_task(&mut self, id: ThreadId) {
-        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
-        let num_threads = self.threads.len();
-        let thread = self.threads.iter_mut().find(|t| t.lock().id == id);
-        if let Some(thread) = thread {
-            let mut thread = thread.lock();
-            thread.state = ThreadState::Ready;
-            self.ready_queue.push_back(id);
-
-            NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+        if let Some(thread_arc) = self.threads.iter().find(|t| t.lock().id == id) {
+            let mut thread = thread_arc.lock();
+            if let ThreadState::Blocked(_) = thread.state {
+                thread.state = ThreadState::Ready;
+                self.ready_queue.push_back(id);
+                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 }
@@ -246,6 +244,15 @@ pub fn switch_if_needed() {
     NEEDS_RESCHEDULE.store(false, core::sync::atomic::Ordering::SeqCst);
     let next_thread = {
         let mut scheduler = SCHEDULER.lock();
+
+        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        if curr_thread.state == ThreadState::Running && curr_thread.id != 1 {
+            curr_thread.state = ThreadState::Ready;
+            curr_thread.time_slice_remaining = TIME_SLICE;
+
+            scheduler.ready_queue.push_back(curr_thread.id);
+        }
+
         scheduler.pick_next_thread()
     };
 
@@ -261,6 +268,7 @@ pub fn block_task(reason: BlockReason) {
         let _guard = SCHEDULER.lock();
 
         let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        serial_println!("Blocking {} for {:#?}", curr_thread.id, reason);
         curr_thread.state = ThreadState::Blocked(reason);
         curr_thread.time_slice_remaining = TIME_SLICE;
 

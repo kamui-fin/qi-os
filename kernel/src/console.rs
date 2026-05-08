@@ -170,6 +170,10 @@ impl VirtualTerminal {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            b'\x08' => {
+                self.mark_dirty(self.row_position);
+                self.column_position = self.column_position.saturating_sub(1);
+            }
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -281,14 +285,14 @@ impl ConsoleRenderer {
 }
 
 pub struct Console {
-    pub tty: TTY,
+    pub tty: Arc<TTY>,
     last_cursor_pos: (usize, usize),
 }
 
 impl Console {
     pub fn new() -> Self {
         Self {
-            tty: TTY::new(1),
+            tty: Arc::new(TTY::new(1)),
             last_cursor_pos: (0, 0),
         }
     }
@@ -308,6 +312,7 @@ impl Console {
     }
 }
 
+// FIXME: vt + tty + cons relationship rn is circular
 pub static CONS: OnceCell<Mutex<Console>> = OnceCell::uninit();
 
 pub fn init_ttys() {
@@ -326,10 +331,11 @@ pub async fn handle_keyboard() {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(key_event) {
                 serial_println!("Received {:#?}", key);
-                let cons = CONS.get().unwrap().lock();
-                // first check if we want to switch terminal multiplexer
-                if cons.tty.handle_key(key) {
-                    drop(cons);
+                let tty = {
+                    let cons = CONS.get().unwrap().lock();
+                    cons.tty.clone()
+                };
+                if tty.handle_key(key) {
                     wake_tty_renderer();
                 }
             }
@@ -340,11 +346,14 @@ pub async fn handle_keyboard() {
 pub async fn listen_console_buffer() {
     let mut console_chars = ConsoleStream::new();
     while let Some(char) = console_chars.next().await {
-        let cons = CONS.get().unwrap().lock();
-        cons.tty.output_byte(char.ascii_character);
+        let tty = {
+            let cons = CONS.get().unwrap().lock();
+            cons.tty.clone()
+        };
+        tty.output_byte(char.ascii_character);
         // flush rest of queue
         while let Some(Some(char)) = console_chars.next().now_or_never() {
-            cons.tty.output_byte(char.ascii_character);
+            tty.output_byte(char.ascii_character);
         }
         {
             wake_tty_renderer();
@@ -363,20 +372,24 @@ pub struct TtyDeviceHandle {
 
 impl FileOps for TtyDeviceHandle {
     fn read(&self, _: &crate::fs::vfs::File, buffer: &mut [u8]) -> usize {
-        let cons = CONS.get().unwrap().lock();
+        let tty = {
+            let cons = CONS.get().unwrap().lock();
+            cons.tty.clone()
+        };
         // for now it all redirects to one terminal
-        cons.tty.read(buffer)
+        tty.read(buffer)
     }
 
     fn write(&self, _: &crate::fs::vfs::File, buffer: &[u8]) -> usize {
-        let cons = CONS.get().unwrap().lock();
+        let tty = {
+            let cons = CONS.get().unwrap().lock();
+            cons.tty.clone()
+        };
         let string = str::from_utf8(buffer).unwrap_or_default();
-        let bytes_written = cons.tty.write(string);
+        let bytes_written = tty.write(string);
 
-        {
-            drop(cons);
-            wake_tty_renderer();
-        }
+        // THIS CAUSES IT!
+        wake_tty_renderer();
 
         bytes_written
     }

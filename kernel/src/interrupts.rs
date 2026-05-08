@@ -21,7 +21,6 @@ use crate::serial_println;
 use crate::syscall::syscall_entry;
 use crate::task::lock::NEEDS_RESCHEDULE;
 use crate::task::proc::ProcessControlBlock;
-use crate::task::proc::ECHO_ELF;
 use crate::task::proc::XIANGQI_ELF;
 use crate::task::thread::nano_sleep;
 use crate::task::thread::switch_if_needed;
