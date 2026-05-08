@@ -5,7 +5,8 @@ use core::ptr::from_ref;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use elf::abi::PT_LOAD;
 use elf::endian::LittleEndian;
@@ -36,15 +37,18 @@ pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xia
 
 pub static PID: AtomicU64 = AtomicU64::new(1 << 16);
 
-pub struct ProcessControlBlock<'a> {
+pub struct ProcessControlBlock {
     pub pid: u64,
     pub tcb: Arc<Mutex<ThreadControlBlock>>,
-    pub page_table: &'a mut PageTable,
-    pub argv: Vec<&'a str>,
+    pub page_table: Arc<Mutex<PageTable>>,
+    pub argv: Vec<String>,
     pub heap_start: VirtAddr,
     pub heap_end: VirtAddr,
     pub name: &'static str,
     pub backbuffer_frames: Option<Vec<PhysFrame>>,
+
+    pub parent: Option<Weak<RwLock<ProcessControlBlock>>>,
+    pub children: Vec<Arc<RwLock<ProcessControlBlock>>>,
 
     pub cwd: Arc<RwLock<DEntry>>,
     pub fd: Slab<Arc<Mutex<File>>>,
@@ -53,7 +57,7 @@ pub struct ProcessControlBlock<'a> {
 const USER_STACK_SIZE: usize = 64 * 1024;
 pub const MAX_FD: usize = 100;
 
-impl<'a> ProcessControlBlock<'a> {
+impl ProcessControlBlock {
     /*
     Function given curr ESP, reload new SS:ESP
     EIP store on old stack, new EIP popped off new stack when function returns
@@ -203,12 +207,12 @@ impl<'a> ProcessControlBlock<'a> {
 
         // ----------------------------------------
 
-        let mut argv: Vec<&str> = Vec::with_capacity(argc);
+        let mut argv: Vec<String> = Vec::with_capacity(argc);
         for i in 0..argc {
             unsafe {
                 let ptr = *c_argv.add(i);
                 let c_string = CStr::from_ptr(ptr);
-                argv.push(c_string.to_str().unwrap());
+                argv.push(c_string.to_str().unwrap().to_string());
             }
         }
 
@@ -355,7 +359,9 @@ impl<'a> ProcessControlBlock<'a> {
         Self {
             pid,
             tcb,
-            page_table,
+            page_table: Arc::new(Mutex::new(*page_table)),
+            parent,
+            children: Vec::new(),
             argv,
             heap_start,
             heap_end: heap_start,

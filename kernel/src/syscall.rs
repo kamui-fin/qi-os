@@ -129,10 +129,10 @@ pub unsafe extern "C" fn syscall_entry() {
 
 // TODO to be more POSIX-like:
 //  - fork, exec, process tree
-//  - mmap, munmap: maps files or devices into memory (COMPLEX)
-//  - shmctl (shared memory)
 //  - kill, sigaction, sigreturn: send signal, register signal handler
 //  - poll / select / epoll: sleep until any of a set of FDs is ready
+//  - mmap, munmap: maps files or devices into memory (COMPLEX)
+//  - shmctl (shared memory)
 //  - mknod
 //  - utime, ulimit, times
 //  - mount, umount, sync
@@ -169,7 +169,8 @@ enum SysCallKind {
     //  ioctl but manage the fd itself. e.g. set to non-blocking!
     Fcntl,
 
-    Spawn,
+    Fork,
+    Exec,
 
     Yield,
     Exit,
@@ -207,7 +208,8 @@ impl From<usize> for SysCallKind {
             16 => Self::Dup2,
             17 => Self::Pipe,
 
-            18 => Self::Spawn,
+            18 => Self::Fork,
+            28 => Self::Exec,
             19 => Self::Yield,
             20 => Self::Exit,
             21 => Self::GetPid,
@@ -512,7 +514,13 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             sys_exit(arg1);
             0
         }
-        SysCallKind::Spawn => {
+        SysCallKind::Fork => {
+            // no args
+            // return pid of forked process
+
+            0
+        }
+        SysCallKind::Exec => {
             // arg1: *const c_str
             // arg2: argc
             // arg3: argv
