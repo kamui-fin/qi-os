@@ -9,3 +9,4 @@ embedded-graphics-simulator = "0.7.0"
 tinytga = "0.5.0"
 engine = { path = "../engine/" }
 embedded-text = "0.7.3"
+heapless = "0.9.2"

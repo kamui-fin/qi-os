@@ -2,10 +2,7 @@ use crate::{piece::{Piece, PieceType}, position::Position};
 extern crate alloc;
 use super::*;
 use core::panic;
-use alloc::vec;
-use alloc::vec::Vec;
-
-pub const MAX_MOVES: u8 = 17;
+use heapless::Vec;
 
 pub const RED_PALACE: [Position; 9] =
     [
@@ -177,13 +174,13 @@ impl Board {
     }
 
     #[inline]
-    pub fn get_legal_moves(&self) -> Vec<Move> {
-        let mut result = vec![];
+    pub fn get_legal_moves(&self) -> Vec<Move,MAX_MOVES> {
+        let mut result=Vec::new();
         let color = self.get_current_player_color();
         for p in &self.points {
             if let Some(piece) = p {
                 if piece.color == color {
-                    result.extend(piece.get_legal_moves(self))
+                    result.extend_from_slice(&mut piece.get_legal_moves(self)).unwrap();
                 }
             }
         }
@@ -275,7 +272,7 @@ impl Board {
                         GameResult::Victory(current_color)
                     } else if next_turn.is_stalemate() {
                         GameResult::Victory(!current_color)
-                    } else {
+                    } else { 
                         GameResult::Continuing(next_turn)
                     }
                 } else {

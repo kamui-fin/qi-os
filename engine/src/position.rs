@@ -1,6 +1,6 @@
 use super::Color;
-use alloc::vec::Vec;
-
+use heapless::Vec;
+use crate::MAX_MOVES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
@@ -129,7 +129,7 @@ impl Position {
 
     // orthogonal - horizontal and vertical
     // returns Vec with positons left, right, up or down from the current position
-    pub fn orthogonals_to(&self, to_pos: Self) -> Vec<Self> {
+    pub fn orthogonals_to(&self, to_pos: Self) -> Vec<Self,MAX_MOVES> {
         if !self.is_orthogonal_to(to_pos) {
             return Vec::new();
         }
@@ -152,13 +152,13 @@ impl Position {
         for _ in 0..self.orthogonal_distance(to_pos) {
             accumulator.add_col(col_step);
             accumulator.add_row(row_step);
-            result.push(accumulator);
+            result.push(accumulator).unwrap();
         }
         result
 
     }
 
-    pub fn diagonals_to(&self, to_pos: Self) -> Vec<Self> {
+    pub fn diagonals_to(&self, to_pos: Self) -> Vec<Self,MAX_MOVES> {
         if !self.is_diagonal_to(to_pos) {
             return Vec::new();
         }
@@ -183,7 +183,7 @@ impl Position {
         for _ in 0..self.diagonal_distance(to_pos) {
             accumulator.add_col(col_step);
             accumulator.add_row(row_step);
-            result.push(accumulator);
+            result.push(accumulator).unwrap();
         }
         result
         

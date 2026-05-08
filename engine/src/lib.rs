@@ -1,16 +1,13 @@
 #![no_std]
 use core::fmt;
-
-use crate::position::Position;
-
-extern crate alloc;
-
+use crate::{piece::Piece, position::Position};
 pub mod board;
 use board::Board;
 pub mod piece;
 pub mod position;
 pub mod fen;
 
+pub const MAX_MOVES: usize = 200;
 pub const RED: Color = Color::Red;
 pub const BLACK: Color = Color::Black;
 
@@ -65,6 +62,5 @@ pub enum Move{
 
     Resign,
 }
-
 #[cfg(test)]
 mod testpositions;

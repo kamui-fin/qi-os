@@ -1,7 +1,7 @@
-use crate::{BLACK, Color, Move, RED};
+use crate::{BLACK, Color, Move, RED, MAX_MOVES};
 use crate::board::Board;
 use crate::position::Position;
-use alloc::vec::Vec;
+use heapless::Vec;
 use crate::fen::PieceParseError;
 
 //this will only be used to complete our FEN char to Piece matching,
@@ -65,82 +65,82 @@ impl Piece {
         Self {piece_type, color, pos}
     }
 
-    pub fn get_canidates(&self) -> Vec<Move> {
+    pub fn get_canidates(&self) -> Vec<Move, MAX_MOVES> {
         let mut canidates = Vec::new();
         let pos = self.pos;
 
         match self.piece_type {
             PieceType::Advisor => {
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +1, pos.get_col() +1)));
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +1, pos.get_col() -1)));
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -1, pos.get_col() +1)));
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -1, pos.get_col() -1)));
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +1, pos.get_col() +1))).unwrap();
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +1, pos.get_col() -1))).unwrap();
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -1, pos.get_col() +1))).unwrap();
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -1, pos.get_col() -1))).unwrap();
             }
             PieceType::Cannon => {
-                let mut traveling: Vec<Position> = pos.orthogonals_to(Position::new(pos.get_row(), 8));
-                traveling.append(&mut pos.orthogonals_to(Position::new(pos.get_row(), 0)));
-                traveling.append(&mut pos.orthogonals_to(Position::new(0, pos.get_col())));
-                traveling.append(&mut pos.orthogonals_to(Position::new(9, pos.get_col())));
+                let mut traveling: Vec<Position,MAX_MOVES> = pos.orthogonals_to(Position::new(pos.get_row(), 8));
+                traveling.extend_from_slice(&mut pos.orthogonals_to(Position::new(pos.get_row(), 0))).unwrap();
+                traveling.extend_from_slice(&mut pos.orthogonals_to(Position::new(0, pos.get_col()))).unwrap();
+                traveling.extend_from_slice(&mut pos.orthogonals_to(Position::new(9, pos.get_col()))).unwrap();
 
                 for p in traveling.iter() {
-                    canidates.push(Move::Piece(pos, *p));
+                    canidates.push(Move::Piece(pos, *p)).unwrap();
                 }
             }
-            PieceType::Elephant => {
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +2, pos.get_col() +2)));
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +2, pos.get_col() -2)));
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -2, pos.get_col() +2)));
-                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -2, pos.get_col() -2)));
+            PieceType::Elephant => { 
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +2, pos.get_col() +2))).unwrap();
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() +2, pos.get_col() -2))).unwrap();
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -2, pos.get_col() +2))).unwrap();
+                canidates.push(Move::Piece(pos, Position::new(pos.get_row() -2, pos.get_col() -2))).unwrap();
             }
             PieceType::General => {
                 let up = pos.pawn_up(self.color);
                 let down = pos.pawn_down(self.color);
                 let right = pos.next_right();
                 let left = pos.next_left();
-                canidates.push(Move::Piece(pos,up));
-                canidates.push(Move::Piece(pos, down));
-                canidates.push(Move::Piece(pos,right));
-                canidates.push(Move::Piece(pos,left));
+                canidates.push(Move::Piece(pos,up)).unwrap();
+                canidates.push(Move::Piece(pos, down)).unwrap();
+                canidates.push(Move::Piece(pos,right)).unwrap();
+                canidates.push(Move::Piece(pos,left)).unwrap();
             }
             PieceType::Horse => {
-                canidates.push(Move::Piece(pos, pos.next_above().next_above().next_right()));
-                canidates.push(Move::Piece(pos, pos.next_above().next_above().next_left()));
-                canidates.push(Move::Piece(pos, pos.next_above().next_right().next_right()));
-                canidates.push(Move::Piece(pos, pos.next_above().next_left().next_left()));
-                canidates.push(Move::Piece(pos, pos.next_below().next_below().next_right()));
-                canidates.push(Move::Piece(pos, pos.next_below().next_below().next_left()));
-                canidates.push(Move::Piece(pos, pos.next_below().next_right().next_right()));
-                canidates.push(Move::Piece(pos, pos.next_below().next_left().next_left()));
+                canidates.push(Move::Piece(pos, pos.next_above().next_above().next_right())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_above().next_above().next_left())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_above().next_right().next_right())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_above().next_left().next_left())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_below().next_below().next_right())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_below().next_below().next_left())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_below().next_right().next_right())).unwrap();
+                canidates.push(Move::Piece(pos, pos.next_below().next_left().next_left())).unwrap();
             }
             PieceType::Pawn => {
                 let up = pos.pawn_up(self.color);
                 let down = pos.pawn_down(self.color);
                 let right = pos.next_right();
                 let left = pos.next_left();
-                canidates.push(Move::Piece(pos, up));
-                canidates.push(Move::Piece(pos, down));
-                canidates.push(Move::Piece(pos, right));
-                canidates.push(Move::Piece(pos, left));
+                canidates.push(Move::Piece(pos, up)).unwrap();
+                canidates.push(Move::Piece(pos, down)).unwrap();
+                canidates.push(Move::Piece(pos, right)).unwrap();
+                canidates.push(Move::Piece(pos, left)).unwrap();
             }
             PieceType::Rook => {
-                let mut traveling: Vec<Position> = pos.orthogonals_to(Position::new(pos.get_row(), 8));
-                traveling.append(&mut pos.orthogonals_to(Position::new(pos.get_row(), 0)));
-                traveling.append(&mut pos.orthogonals_to(Position::new(0, pos.get_col())));
-                traveling.append(&mut pos.orthogonals_to(Position::new(9, pos.get_col())));
+                let mut traveling: Vec<Position, MAX_MOVES> = pos.orthogonals_to(Position::new(pos.get_row(), 8));
+                traveling.extend_from_slice(&mut pos.orthogonals_to(Position::new(pos.get_row(), 0))).unwrap();
+                traveling.extend_from_slice(&mut pos.orthogonals_to(Position::new(0, pos.get_col()))).unwrap();
+                traveling.extend_from_slice(&mut pos.orthogonals_to(Position::new(9, pos.get_col()))).unwrap();
 
                 for p in traveling.iter() {
-                    canidates.push(Move::Piece(pos,*p));
+                    canidates.push(Move::Piece(pos,*p)).unwrap();
                 }
             }
         }
         canidates
     }
 
-    pub fn get_legal_moves(&self, board: &Board) -> Vec<Move> {
+    pub fn get_legal_moves(&self, board: &Board) -> Vec<Move,MAX_MOVES> {
             self.get_canidates()
             .into_iter()
             .filter(|&x| board.is_legal_move(x, self.color))
-            .collect::<Vec<Move>>()
+            .collect::<Vec<Move, MAX_MOVES>>()
     }
 
     pub fn is_legal_move(&self, new_pos: Position, board: &Board) -> bool {
@@ -154,7 +154,7 @@ impl Piece {
                 if !new_pos.is_in_palace(self.color){
                     return false;
                 }
-                let traveling: Vec<Position>;
+                let traveling: Vec<Position,MAX_MOVES>;
                 match self.color {
                     Color::Red => {
                         traveling = new_pos.orthogonals_to(Position::new(9, new_pos.get_col())); 
@@ -207,7 +207,7 @@ impl Piece {
                 }
                 if board.has_enemy_piece(new_pos, self.color){
                     let mut jmp_count: u8 = 0;
-                    let mut traveling: Vec<Position> = self.pos.orthogonals_to(new_pos);
+                    let mut traveling: Vec<Position,MAX_MOVES> = self.pos.orthogonals_to(new_pos);
                     traveling.pop();
 
                     for point in traveling.iter() {
@@ -219,7 +219,7 @@ impl Piece {
                         return false;
                     } else {return true}
                 } else {
-                    let mut traveling: Vec<Position> = self.pos.orthogonals_to(new_pos);
+                    let mut traveling: Vec<Position,MAX_MOVES> = self.pos.orthogonals_to(new_pos);
                     traveling.pop();
 
                     for point in traveling.iter() {
@@ -239,7 +239,7 @@ impl Piece {
                 if !self.pos.is_orthogonal_to(new_pos) {
                     return false;
                 }
-                let mut traveling: Vec<Position> = self.pos.orthogonals_to(new_pos);
+                let mut traveling: Vec<Position,MAX_MOVES> = self.pos.orthogonals_to(new_pos);
                 traveling.pop();
 
                 for point in traveling.iter() {
@@ -323,7 +323,7 @@ impl Piece {
                 || self.pos.diagonal_distance(new_pos) < 2 {
                     return false
                 }
-                let mut traveling: Vec<Position> = self.pos.diagonals_to(new_pos);
+                let mut traveling: Vec<Position,MAX_MOVES> = self.pos.diagonals_to(new_pos);
                 traveling.pop();
 
                 for point in traveling.iter() {
