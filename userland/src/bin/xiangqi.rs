@@ -19,7 +19,7 @@ use embedded_graphics::{
     Drawable,
 };
 use userland::{
-    close, get_unix_time, init_heap, syscall_get_backbuffer, syscall_notify_frame_update,
+    close, exit, get_unix_time, init_heap, syscall_get_backbuffer, syscall_notify_frame_update,
     syscall_sleep, write,
 };
 use userland::{open, println};
@@ -57,11 +57,12 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
 
     // syscall_notify_frame_update();
 
-    // println!("Hello World!");
-    loop {
-        syscall_sleep(1000 * 5);
-        // println!("I'm awake now!");
-    }
+    println!("Hello World from XiangQi!");
+    // loop {
+    //     syscall_sleep(1000 * 5);
+    //     // println!("I'm awake now!");
+    // }
+    exit(0);
 
     0
 }

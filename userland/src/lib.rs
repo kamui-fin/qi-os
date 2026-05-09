@@ -1,14 +1,45 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 // Syscalls
 
 use core::{
-    ffi::CStr,
+    ffi::{c_char, c_str, CStr},
     fmt::{self, Write},
 };
 
+use alloc::{ffi::CString, vec::Vec};
 use common::UserWindow;
+
+pub fn fork() -> u64 {
+    let child_pid: u64;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 18,
+            lateout("rax") child_pid
+        );
+    };
+    child_pid
+}
+
+pub fn execvp(program_name: &str, argv: &[&str]) {
+    let prog = CString::new(program_name).unwrap();
+    let c_strings: Vec<CString> = argv.iter().map(|&s| CString::new(s).unwrap()).collect();
+    let mut ptrs: Vec<*const c_char> = c_strings.iter().map(|c| c.as_ptr()).collect();
+    ptrs.push(core::ptr::null());
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 28,
+            in("rdi") prog.as_ptr(),
+            in("rsi") argv.len(),
+            in("rdx") ptrs.as_ptr(),
+        );
+    };
+}
 
 // open, close, read, write
 pub fn open(path: &CStr) -> u64 {

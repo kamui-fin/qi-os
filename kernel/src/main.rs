@@ -213,8 +213,8 @@ fn compositor_task() {
 
         // paint each proccess backbuffer, for now there's no z-index
         for curr_proc in procs.iter() {
-            serial_println!("{}", curr_proc.backbuffer_frames.is_none());
-            if let Some(bb_frames) = &curr_proc.backbuffer_frames {
+            serial_println!("{}", curr_proc.adsp.backbuffer_frames.is_none());
+            if let Some(bb_frames) = &curr_proc.adsp.backbuffer_frames {
                 serial_println!("Painting frame!");
                 let boot_info = BOOT_INFO.get().unwrap().lock();
                 let mut screen = SCREEN.get().unwrap().lock();

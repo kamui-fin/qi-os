@@ -1,23 +1,25 @@
-use core::arch::naked_asm;
+use core::arch::{asm, naked_asm};
 use core::ffi::{c_str, CStr};
-use core::num;
 use core::ptr::from_ref;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
+use core::{mem, num};
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
 use elf::abi::PT_LOAD;
 use elf::endian::LittleEndian;
 use elf::ElfBytes;
 use slab::Slab;
 use spin::{Mutex, RwLock};
+use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::MapToError;
-use x86_64::structures::paging::page::PageRangeInclusive;
+use x86_64::structures::paging::page::{self, PageRangeInclusive};
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{FrameAllocator, Mapper, PageTableIndex, Size4KiB, Translate};
-use x86_64::PhysAddr;
+use x86_64::{addr, PhysAddr};
 use x86_64::{
     structures::paging::{
         frame::PhysFrameRangeInclusive, OffsetPageTable, Page, PageTable, PageTableFlags,
@@ -28,9 +30,12 @@ use x86_64::{
 
 use crate::driver::serial;
 use crate::fs::vfs::{find_dentry, get_root_dentry, DEntry, File, OpenFlags};
-use crate::task::thread::{CURR_THREAD_PTR, SCHEDULER};
+use crate::interrupts::TIME_SLICE;
+use crate::mem::gdt::GDT;
+use crate::syscall::TrapFrame;
+use crate::task::thread::{CURR_THREAD_PTR, KERNEL_STACK_SIZE, SCHEDULER};
 use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
-use crate::{serial_println, BOOT_INFO, PROC};
+use crate::{serial_println, BootInfo, BOOT_INFO, PROC};
 
 pub static SHELL_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_shell"));
 pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xiangqi"));
@@ -51,8 +56,7 @@ pub struct AddressSpace {
 }
 
 impl AddressSpace {
-    fn next_table<'a>(entry: &PageTableEntry) -> &'a PageTable {
-        let boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
+    fn next_table<'a>(boot_info: &BootInfo, entry: &PageTableEntry) -> &'a PageTable {
         let page_table_ptr =
             VirtAddr::new(entry.addr().as_u64() + boot_info.physical_memory_offset).as_ptr();
         let page_table: &PageTable = unsafe { &*page_table_ptr };
@@ -77,20 +81,34 @@ impl AddressSpace {
             Some(new_frames)
         };
 
-        for (i4, entry) in self.get_page_table().level_4_table().iter().enumerate() {
+        let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
+        for (i4, entry) in self
+            .get_page_table(boot_info.physical_memory_offset)
+            .level_4_table()
+            .iter()
+            .enumerate()
+        {
             if i4 >= 256 {
                 mapper.level_4_table()[i4] = entry.clone();
-            } else {
-                for (i3, entry) in Self::next_table(entry).iter().enumerate() {
-                    for (i2, entry) in Self::next_table(entry).iter().enumerate() {
-                        for (i1, entry) in Self::next_table(entry).iter().enumerate() {
+            } else if !entry.is_unused() {
+                for (i3, entry) in Self::next_table(&boot_info, entry).iter().enumerate() {
+                    if entry.is_unused() {
+                        continue;
+                    }
+                    for (i2, entry) in Self::next_table(&boot_info, entry).iter().enumerate() {
+                        if entry.is_unused() {
+                            continue;
+                        }
+                        for (i1, entry) in Self::next_table(&boot_info, entry).iter().enumerate() {
                             if !entry.is_unused() {
-                                let mut boot_info =
-                                    BOOT_INFO.get().expect("Boot info not initialized").lock();
                                 let og_frame = entry.frame().unwrap();
                                 let new_frame = boot_info.allocator.allocate_frame().unwrap();
                                 // copy original frame data into this new frame
-                                copy_frame_data(og_frame, new_frame);
+                                copy_frame_data(
+                                    og_frame,
+                                    new_frame,
+                                    boot_info.physical_memory_offset,
+                                );
                                 unsafe {
                                     mapper.map_to(
                                         Page::from_page_table_indices(
@@ -123,7 +141,6 @@ impl AddressSpace {
         let stack_top = Self::map_stack(&mut mapper);
         let (program_start, program_end) = Self::load_elf(program_code, &mut mapper);
         let heap_start = VirtAddr::new(program_end + 1u64).align_up(4096u64);
-        // let (argv, rsp) = Self::copy_args_to_stack(c_argv, argc, stack_top, &mut mapper, program);
         Self {
             cr3,
             heap_start,
@@ -263,7 +280,7 @@ impl AddressSpace {
         program: &'static CStr,
     ) -> (Vec<String>, VirtAddr) {
         let boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
-        let mapper = self.get_page_table();
+        let mapper = self.get_page_table(boot_info.physical_memory_offset);
         let mut arg_ptrs = Vec::new();
 
         // copy program_name
@@ -392,16 +409,23 @@ impl AddressSpace {
         stack_top
     }
 
-    fn get_page_table(&self) -> OffsetPageTable<'_> {
-        let boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
-        let l4_virt = VirtAddr::new(self.cr3 + boot_info.physical_memory_offset);
+    pub fn get_page_table(&self, offset: u64) -> OffsetPageTable<'_> {
+        let l4_virt = VirtAddr::new(self.cr3 + offset);
         let page_table: &mut PageTable = unsafe { &mut *l4_virt.as_mut_ptr() };
-        unsafe { OffsetPageTable::new(page_table, VirtAddr::new(boot_info.physical_memory_offset)) }
+        unsafe { OffsetPageTable::new(page_table, VirtAddr::new(offset)) }
     }
 }
 
-fn copy_frame_data(og_frame: PhysFrame, new_frame: PhysFrame) {
-    todo!()
+fn copy_frame_data(og_frame: PhysFrame, new_frame: PhysFrame, offset: u64) {
+    let og_virt = VirtAddr::new(og_frame.start_address().as_u64() + offset);
+    let new_virt = VirtAddr::new(new_frame.start_address().as_u64() + offset);
+
+    let og_virt = og_virt.as_ptr() as *const u8;
+    let new_virt = new_virt.as_mut_ptr() as *mut u8;
+
+    unsafe {
+        new_virt.copy_from_nonoverlapping(og_virt, og_frame.size() as usize);
+    }
 }
 
 pub struct ProcessControlBlock {
@@ -549,21 +573,28 @@ where
     f(curr_proc)
 }
 
-pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char, argc: usize) {
-    let binary = match program.to_str().unwrap() {
+fn get_program_binary(program: &'static CStr) -> &[u8] {
+    match program.to_str().unwrap() {
         "shell" => SHELL_ELF,
         "xiangqi" => XIANGQI_ELF,
         _ => {
             panic!("unrecognized program")
         }
-    };
+    }
+}
+
+pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char, argc: usize) {
     serial_println!("Spawning process {}", program.to_str().unwrap());
-    let proc =
-        ProcessControlBlock::from_bytes(binary, argv, argc, program, get_root_dentry(), None);
+    let proc = ProcessControlBlock::from_bytes(
+        argv,
+        argc,
+        get_program_binary(program),
+        program,
+        get_root_dentry(),
+        None,
+    );
     let id = proc.tcb.lock().id;
     let tcb_clone = proc.tcb.clone();
-
-    serial_println!("{}", proc.tcb.lock().id);
 
     PROC.get().unwrap().lock().push(proc);
 
@@ -572,20 +603,87 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
     scheduler.ready_queue.push_back(id);
 }
 
-pub fn fork() -> Option<ProcessControlBlock> {
+pub fn exec(
+    program: &'static CStr,
+    argv: *const *const core::ffi::c_char,
+    argc: usize,
+    tf: &mut TrapFrame,
+) {
+    let mut addr_space = AddressSpace::from_elf(get_program_binary(program));
+    let cr3 = addr_space.cr3;
+    let (argv, rsp) = addr_space.copy_args_to_stack(argv, argc, program);
+
+    with_curr_proc_mut(|p| {
+        let rip = addr_space.program_start;
+        let rsp = rsp.as_u64();
+
+        p.name = program.to_str().unwrap();
+        p.adsp = addr_space;
+        p.argv = argv;
+        p.tcb.lock().cr3 = cr3 as *const usize;
+
+        tf.zero_out();
+        tf.rip = rip as usize;
+        tf.rsp = rsp as usize;
+        tf.cs = GDT.1.user_code_selector.0 as usize;
+        tf.ss = GDT.1.user_data_selector.0 as usize;
+        tf.rflags = 0x0000000000000202; // reserved bit 1 + IF interrupt
+
+        unsafe {
+            asm!(
+                "mov cr3, {}",
+                in(reg) cr3,
+                options(nostack, preserves_flags)
+            );
+        }
+    });
+}
+
+#[unsafe(naked)]
+pub unsafe extern "C" fn fork_start_hook() {
+    // basically the second half of syscall_entry()
+    naked_asm!(
+        "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
+        "pop rbp", "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rbx", "pop rax", "iretq"
+    );
+}
+
+pub fn fork(tf: &TrapFrame) -> u64 {
     let child_pid = PID.fetch_add(1u64, core::sync::atomic::Ordering::Relaxed);
 
-    with_curr_proc(|og_proc| {
+    let child_proc = with_curr_proc(|og_proc| {
+        let mut new_tf = tf.clone();
+        new_tf.rax = 0;
+
         let new_address_space = og_proc.adsp.clone_for_fork();
 
-        let tcb = Arc::new(Mutex::new(ThreadControlBlock::new(
-            child_pid,
-            ProcessControlBlock::user_process_hook as *const (),
-            Some(new_address_space.cr3 as *const usize),
-            Some(rip),
-            Some(rsp),
-        )));
+        let max_stack_len = KERNEL_STACK_SIZE / core::mem::size_of::<usize>();
+        let mut stack: Box<[usize]> = vec![0usize; max_stack_len].into_boxed_slice();
 
+        let sz = mem::size_of::<TrapFrame>() / core::mem::size_of::<usize>();
+        let start = max_stack_len - sz;
+        let ptr = stack[start..].as_mut_ptr() as *mut TrapFrame;
+        unsafe {
+            ptr.write(new_tf);
+        }
+
+        let ctx_start = start - 7;
+        stack[ctx_start + 6] = fork_start_hook as *const () as usize;
+
+        let rsp = from_ref(&stack[ctx_start]);
+        let rsp0 = unsafe { stack.as_ptr().add(max_stack_len) };
+
+        let tcb = ThreadControlBlock {
+            rsp,
+            rsp0,
+            cr3: new_address_space.cr3 as *const usize,
+            state: crate::task::thread::ThreadState::Ready,
+            id: child_pid,
+            stack,
+            time_slice_remaining: TIME_SLICE,
+        };
+
+        let new_tcb = Arc::new(Mutex::new(tcb));
         let new_proc = ProcessControlBlock {
             pid: child_pid,
             name: og_proc.name,
@@ -597,32 +695,17 @@ pub fn fork() -> Option<ProcessControlBlock> {
             adsp: new_address_space,
             children: Vec::new(),
         };
-        /*
-        tcb,
-        argv,
-        name: program_name.to_str().unwrap(),
-        parent,
-        children: Vec::new(),
-        cwd: directory,
-        fd: Self::setup_fd(), */
+
+        new_proc
     });
 
-    /* let (cr3, mut mapper) = Self::setup_page_table();
-    let stack_top = Self::map_stack(&mut mapper);
+    let tcb_clone = child_proc.tcb.clone();
 
-    let (argv, rsp) = Self::copy_args_to_stack(c_argv, argc, stack_top, &mut mapper, program);
+    PROC.get().unwrap().lock().push(child_proc);
 
-    let (program_start, program_end) = Self::load_elf(program_code, &mut mapper);
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.threads.push(tcb_clone);
+    scheduler.ready_queue.push_back(child_pid);
 
-    let heap_start = VirtAddr::new(program_end + 1u64).align_up(4096u64);
-
-    let tcb = Arc::new(Mutex::new(ThreadControlBlock::new(
-        pid,
-        Self::user_process_hook as *const (),
-        Some(cr3 as *const usize),
-        Some(program_start),
-        Some(rsp.as_u64()),
-    ))); */
-
-    None
+    child_pid
 }

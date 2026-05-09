@@ -4,7 +4,7 @@
 extern crate alloc;
 use alloc::string::{String, ToString};
 use core::{arch::global_asm, ffi::c_char, panic::PanicInfo};
-use userland::{exit, init_heap, print, println, read};
+use userland::{execvp, exit, fork, init_heap, print, println, read};
 
 global_asm!(
     ".section .text._start",
@@ -32,13 +32,21 @@ fn read_line() -> String {
 pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
     init_heap();
 
-    print!("[~] > ");
-    loop {
-        let line = read_line();
-        println!("{}", line);
-        print!("[~] > ");
+    println!("About to fork();");
+    let pid = fork();
+    if pid == 0 {
+        println!("About to execvp(xiangqi) from shell");
+        execvp("xiangqi", &["test"]);
     }
 
+    // print!("[~] > ");
+    // loop {
+    //     let line = read_line();
+    //     println!("{}", line);
+    //     print!("[~] > ");
+    // }
+
+    exit(1);
     0
 }
 

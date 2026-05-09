@@ -20,6 +20,8 @@ use crate::fs::vfs::StatusFlags;
 use crate::interrupts;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
+use crate::task::proc::exec;
+use crate::task::proc::fork;
 use crate::task::proc::with_curr_proc;
 use crate::task::proc::with_curr_proc_mut;
 use crate::task::proc::MAX_FD;
@@ -59,25 +61,53 @@ use crate::{
 };
 
 #[repr(C)]
-#[derive(Debug)]
-struct TrapFrame {
-    r15: usize,
-    r14: usize,
-    r13: usize,
-    r12: usize,
-    r11: usize,
-    r10: usize,
-    r9: usize,
-    r8: usize,
-    rbp: usize,
-    rdi: usize,
-    rsi: usize,
-    rdx: usize,
-    rcx: usize,
-    rbx: usize,
-    rax: usize,
+#[derive(Debug, Clone)]
+pub struct TrapFrame {
+    pub r15: usize,
+    pub r14: usize,
+    pub r13: usize,
+    pub r12: usize,
+    pub r11: usize,
+    pub r10: usize,
+    pub r9: usize,
+    pub r8: usize,
+    pub rbp: usize,
+    pub rdi: usize,
+    pub rsi: usize,
+    pub rdx: usize,
+    pub rcx: usize,
+    pub rbx: usize,
+    pub rax: usize,
+    pub rip: usize,
+    pub cs: usize,
+    pub rflags: usize,
+    pub rsp: usize,
+    pub ss: usize,
+}
 
-    // do i also add ss, rip, rflags, and cs here
+impl TrapFrame {
+    pub fn zero_out(&mut self) {
+        self.r15 = 0;
+        self.r14 = 0;
+        self.r13 = 0;
+        self.r12 = 0;
+        self.r11 = 0;
+        self.r10 = 0;
+        self.r9 = 0;
+        self.r8 = 0;
+        self.rbp = 0;
+        self.rdi = 0;
+        self.rsi = 0;
+        self.rdx = 0;
+        self.rcx = 0;
+        self.rbx = 0;
+        self.rax = 0;
+        self.rip = 0;
+        self.cs = 0;
+        self.rflags = 0;
+        self.rsp = 0;
+        self.ss = 0;
+    }
 }
 
 #[unsafe(naked)]
@@ -246,6 +276,21 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
     let arg6 = trap_frame.r9;
     serial_println!("{:#?}()", kind);
     let return_value: usize = match kind {
+        SysCallKind::Fork => {
+            // no args
+            // return pid of forked process
+            fork(trap_frame) as usize
+        }
+        SysCallKind::Exec => {
+            // arg1: *const c_str
+            // arg2: argc
+            // arg3: argv
+            let prgrm_name = unsafe { CStr::from_ptr(arg1 as *const i8) };
+            let argv = arg3 as *const *const c_char;
+            let argc = arg2;
+            exec(prgrm_name, argv, argc, trap_frame);
+            0
+        }
         SysCallKind::Open => {
             // arg1: pathname *const c_cstr
             // arg2: flags
@@ -516,19 +561,6 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             sys_exit(arg1);
             0
         }
-        SysCallKind::Fork => {
-            // no args
-            // return pid of forked process
-
-            0
-        }
-        SysCallKind::Exec => {
-            // arg1: *const c_str
-            // arg2: argc
-            // arg3: argv
-            sys_spawn(arg1, arg2, arg3);
-            0
-        }
         SysCallKind::GetPid => sys_get_pid(),
         SysCallKind::AllocBackBuffer => {
             // arg1: *mut UserWindow
@@ -568,7 +600,7 @@ fn sys_alloc(arg1: usize) -> usize {
         .find(|p| p.tcb.lock().id == curr_thread_id)
         .unwrap();
 
-    let old_heap_end = curr_proc.heap_end;
+    let old_heap_end = curr_proc.adsp.heap_end;
     let new_heap_end = old_heap_end + arg1;
 
     let old_mapped_end = old_heap_end.align_up(4096u64);
@@ -578,7 +610,9 @@ fn sys_alloc(arg1: usize) -> usize {
         let start_page = Page::<Size4KiB>::containing_address(old_mapped_end);
         let end_page = Page::<Size4KiB>::containing_address(new_mapped_end - 1u64);
 
-        let mut mapper = curr_proc.get_page_table();
+        let mut mapper = curr_proc
+            .adsp
+            .get_page_table(boot_info.physical_memory_offset);
         // map pages in-between
         for page in Page::range_inclusive(start_page, end_page) {
             let frame = boot_info
@@ -609,7 +643,7 @@ fn sys_alloc(arg1: usize) -> usize {
         }
     }
 
-    curr_proc.heap_end = new_heap_end;
+    curr_proc.adsp.heap_end = new_heap_end;
     old_heap_end.as_u64() as usize
 }
 
@@ -639,7 +673,9 @@ fn sys_alloc_back_buffer(arg1: usize) {
     let mut boot_info = BOOT_INFO.get().unwrap().lock();
     let screen = SCREEN.get().unwrap().lock();
     // not seeing any prints after here???
-    let mut mapper = curr_proc.get_page_table();
+    let mut mapper = curr_proc
+        .adsp
+        .get_page_table(boot_info.physical_memory_offset);
     let buffer_num_bytes = screen.bytes_per_line * screen.height;
 
     let num_frames = buffer_num_bytes.div_ceil(4096);
@@ -678,7 +714,7 @@ fn sys_alloc_back_buffer(arg1: usize) {
         mapper_flush.flush();
     }
 
-    curr_proc.backbuffer_frames = Some(backbuffer_frames);
+    curr_proc.adsp.backbuffer_frames = Some(backbuffer_frames);
 
     // Fill in user passed in FrameBufferInfo struct
     let user_window_info = unsafe { &mut *(arg1 as *mut UserWindow) };

@@ -2,6 +2,7 @@ use core::ffi::CStr;
 
 use alloc::sync::Arc;
 use spin::Mutex;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     driver::cmos::get_unix_time,
@@ -12,6 +13,7 @@ use crate::{
 
 pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
     let file = with_curr_proc_mut(|p| p.fd.get_mut(fd as usize).unwrap().clone());
+
     let mut file = file.lock();
 
     let bytes_written = file.ops.write(&file, buf);
@@ -20,7 +22,6 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
     let mut meta = file.inode.meta.lock();
     meta.mtime = get_unix_time() as u64;
     meta.dirty = true;
-
     bytes_written
 }
 

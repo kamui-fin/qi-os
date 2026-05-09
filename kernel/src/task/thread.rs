@@ -55,16 +55,16 @@ pub type ThreadId = u64;
 #[repr(C)]
 #[derive(Debug)]
 pub struct ThreadControlBlock {
-    rsp: *const usize,
-    rsp0: *const usize, // kernel stack pointer to use when entering kernel
-    cr3: *const usize,
+    pub rsp: *const usize,
+    pub rsp0: *const usize, // kernel stack pointer to use when entering kernel
+    pub cr3: *const usize,
     pub state: ThreadState,
     pub id: ThreadId,
-    stack: Option<Box<[usize]>>,
+    pub stack: Box<[usize]>,
     pub time_slice_remaining: usize, // resets to 100 ms upon context switch
 }
 
-const KERNEL_STACK_SIZE: usize = 1 * Size2MiB::SIZE as usize;
+pub const KERNEL_STACK_SIZE: usize = 1 * Size2MiB::SIZE as usize;
 
 #[unsafe(naked)]
 pub unsafe extern "C" fn task_startup_hook() {
@@ -111,7 +111,7 @@ impl ThreadControlBlock {
         });
 
         Self {
-            stack: Some(stack),
+            stack,
             rsp,
             rsp0,
             cr3,
@@ -134,7 +134,7 @@ impl ThreadControlBlock {
         }
 
         Self {
-            stack: None,
+            stack: Box::new([]),
             rsp: rsp,
             rsp0: rsp,
             cr3,
