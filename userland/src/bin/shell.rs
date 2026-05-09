@@ -16,7 +16,7 @@ global_asm!(
     "   and rsp, -16 ",
     "   call main    ",
     "   mov rdi, rax ",
-    "   mov rax, 1   ",
+    "   mov rax, 20   ",
     "   int 0x80     ",
 );
 
@@ -45,8 +45,6 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> u8 {
     //     println!("{}", line);
     //     print!("[~] > ");
     // }
-
-    exit(1);
     0
 }
 
