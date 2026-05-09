@@ -71,8 +71,8 @@ pub unsafe extern "C" fn task_startup_hook() {
     naked_asm!(
         "sti",
         "call r12",
-        /* "call {terminate}",
-        terminate = sym crate::thread::terminate_task, */
+        "call {terminate}",
+        terminate = sym crate::task::thread::terminate_task,
     );
 }
 
@@ -104,7 +104,7 @@ impl ThreadControlBlock {
             let cr3: *const usize;
             unsafe {
                 asm!(r#"
-                mov {}, cr3    // Drop the Box! Arc<Spinlock<T>> is the standard way.
+                mov {}, cr3  
             "#, out(reg) cr3)
             }
             cr3

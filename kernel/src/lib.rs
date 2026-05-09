@@ -2,7 +2,7 @@
 #![no_std]
 #![no_main]
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use lazy_static::lazy_static;
@@ -23,13 +23,13 @@ extern crate alloc;
 pub mod console;
 pub mod driver;
 pub mod fs;
-pub mod tty;
 pub mod graphics;
 pub mod interrupts;
 pub mod mem;
 pub mod random;
 pub mod syscall;
 pub mod task;
+pub mod tty;
 
 lazy_static! {
     pub static ref UNAME: UtsName = UtsName {

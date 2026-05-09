@@ -76,6 +76,8 @@ struct TrapFrame {
     rcx: usize,
     rbx: usize,
     rax: usize,
+
+    // do i also add ss, rip, rflags, and cs here
 }
 
 #[unsafe(naked)]
@@ -576,12 +578,7 @@ fn sys_alloc(arg1: usize) -> usize {
         let start_page = Page::<Size4KiB>::containing_address(old_mapped_end);
         let end_page = Page::<Size4KiB>::containing_address(new_mapped_end - 1u64);
 
-        let mut mapper = unsafe {
-            OffsetPageTable::new(
-                curr_proc.page_table,
-                VirtAddr::new(boot_info.physical_memory_offset),
-            )
-        };
+        let mut mapper = curr_proc.get_page_table();
         // map pages in-between
         for page in Page::range_inclusive(start_page, end_page) {
             let frame = boot_info
@@ -642,12 +639,7 @@ fn sys_alloc_back_buffer(arg1: usize) {
     let mut boot_info = BOOT_INFO.get().unwrap().lock();
     let screen = SCREEN.get().unwrap().lock();
     // not seeing any prints after here???
-    let mut mapper = unsafe {
-        OffsetPageTable::new(
-            curr_proc.page_table,
-            VirtAddr::new(boot_info.physical_memory_offset),
-        )
-    };
+    let mut mapper = curr_proc.get_page_table();
     let buffer_num_bytes = screen.bytes_per_line * screen.height;
 
     let num_frames = buffer_num_bytes.div_ceil(4096);
