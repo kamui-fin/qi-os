@@ -1,12 +1,15 @@
 use core::sync::atomic::AtomicU64;
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use spin::Mutex;
 
 use crate::{
     fs::vfs::{File, FileOps, FsType, INode, INodeData, INodeOps, OpenFlags, Stat, SuperBlock},
-    task::thread::{block_task_drop_lock, BlockReason, ThreadState, SCHEDULER},
+    task::{
+        proc::thread_for_proc,
+        thread::{block_task_drop_lock, BlockReason, ThreadState, SCHEDULER},
+    },
     PROC,
 };
 
@@ -135,18 +138,23 @@ enum Direction {
 
 // TODO: obviously this is O(n) but its a quick directly
 fn wake_pipe_sleepers(pipe_id: u64, dir: Direction) {
-    let mut sched = SCHEDULER.lock();
     let procs = PROC.get().unwrap().lock();
+    let mut to_wake = Vec::new();
     for proc in procs.iter() {
-        let thread = proc.tcb.lock();
+        let thread = thread_for_proc(proc.lock().pid).unwrap();
+        let thread = thread.lock();
         match (&dir, &thread.state) {
             (Direction::Read, ThreadState::Blocked(BlockReason::WaitPipeRead(waiting_on)))
             | (Direction::Write, ThreadState::Blocked(BlockReason::WaitPipeWrite(waiting_on))) => {
                 if *waiting_on == pipe_id {
-                    sched.unblock_task(thread.id);
+                    to_wake.push(thread.id);
                 }
             }
             _ => {}
         };
+    }
+    let mut sched = SCHEDULER.lock();
+    for thread_id in to_wake {
+        sched.unblock_task(thread_id);
     }
 }

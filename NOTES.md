@@ -1,16 +1,21 @@
 # Roadmap
 
+- fix all deadlocks
+    - refactor to fine-grained locks
+    - hardcode e.g. physical memory offset (NO NEED FOR LOCK)
+- wait queues
 - Shell
     - env var
 - unit + integration testing setup
     - Kernel debugger (quit & dump useful info on key press)
 - buddy + slab allocator
-- wait queues
+- proper error handling
 - more concurrency:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
+
 
 
 Wayyy into future:
@@ -27,4 +32,5 @@ Wayyy into future:
 - filesystem buffering
 - more advanced scheduler
 - stack smash protector
+- run llm on cpu
 - TCP/IP stack

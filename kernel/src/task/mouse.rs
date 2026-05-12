@@ -1,4 +1,4 @@
-use crate::{driver::mouse::GenericPs2Packet, println, serial_println, BOOT_INFO, SCREEN};
+use crate::{driver::mouse::GenericPs2Packet, println, serial_println, SCREEN};
 use conquer_once::spin::OnceCell;
 use core::{
     pin::Pin,
@@ -72,7 +72,7 @@ pub async fn print_mouse_movement() {
     let mut x = 0 as i32;
     let mut y = 0 as i32;
     while let Some(packet) = packets.next().await {
-        let mut screen = SCREEN.get().unwrap().lock();
+        let screen = SCREEN.get().unwrap().lock();
 
         // draw cursor
         x += packet.get_x() as i32;
@@ -86,8 +86,8 @@ pub async fn print_mouse_movement() {
 
         // screen.clear(Rgb565::BLACK).unwrap();
         /* Circle::new(point, 15)
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
-            .draw(&mut *screen)
-            .unwrap(); */
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
+        .draw(&mut *screen)
+        .unwrap(); */
     }
 }

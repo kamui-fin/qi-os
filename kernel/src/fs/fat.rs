@@ -1011,13 +1011,22 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
                 false => NodeType::File,
             };
         let entries = self.read_dir_from_cluster(dir.inum as u32);
+
         entries
             .iter()
-            .map(|e| DEntryMinimal {
-                name: e.entry.name_as_str(),
-                inum: e.entry.first_cluster() as u64,
-                size: e.entry.file_size as usize,
-                filetype: attr_to_node_type(e.entry.attr),
+            .map(|e| {
+                let mut name_buf = [0u8; 64];
+                let e_name = e.entry.name_as_str();
+                let name_bytes = e_name.as_bytes();
+                let copy_len = name_bytes.len().min(64);
+                name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+                return DEntryMinimal {
+                    name: name_buf,
+                    inum: e.entry.first_cluster() as u64,
+                    size: e.entry.file_size as usize,
+                    filetype: attr_to_node_type(e.entry.attr),
+                };
             })
             .collect()
     }

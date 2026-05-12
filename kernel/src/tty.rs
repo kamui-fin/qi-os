@@ -11,6 +11,7 @@ use crate::{
     print, serial_print, serial_println,
     task::{
         keyboard::ScancodeStream,
+        proc::thread_for_proc,
         thread::{block_task, BlockReason, ThreadState, SCHEDULER},
         tty::{self},
     },
@@ -171,10 +172,10 @@ impl TTY {
     fn wakeup_readers(&self) {
         let readers_to_wake = {
             let mut threads = Vec::new();
-
             let procs = PROC.get().unwrap().lock();
             for proc in procs.iter() {
-                let thread = proc.tcb.lock();
+                let thread = thread_for_proc(proc.lock().pid).unwrap();
+                let thread = thread.lock();
                 if let ThreadState::Blocked(BlockReason::WaitStdin(tty_num)) = thread.state {
                     if self.id == tty_num {
                         threads.push(thread.id);

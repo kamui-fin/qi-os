@@ -2,17 +2,20 @@ use core::ffi::CStr;
 
 use alloc::sync::Arc;
 use spin::Mutex;
-use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     driver::cmos::get_unix_time,
-    fs::vfs::{find_dentry, find_mountpoint, find_parent_dentry, Fd, File, OpenFlags, StatusFlags},
+    fs::vfs::{find_dentry, find_parent_dentry, Fd, File, OpenFlags, StatusFlags},
     serial_println,
-    task::proc::{with_curr_proc, with_curr_proc_mut},
+    task::proc::curr_proc,
 };
 
 pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
-    let file = with_curr_proc_mut(|p| p.fd.get_mut(fd as usize).unwrap().clone());
+    let file = {
+        let p = curr_proc();
+        let mut p = p.lock();
+        p.fd.get_mut(fd as usize).unwrap().clone()
+    };
 
     let mut file = file.lock();
 
@@ -26,7 +29,11 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
 }
 
 pub fn sys_read(fd: Fd, buf: &mut [u8]) -> usize {
-    let file = with_curr_proc(|p| p.fd.get(fd as usize).unwrap().clone());
+    let file = {
+        let p = curr_proc();
+        let p = p.lock();
+        p.fd.get(fd as usize).unwrap().clone()
+    };
 
     let mut file_guard = file.lock();
     let bytes_read = file_guard.ops.read(&file_guard, buf);
@@ -61,11 +68,14 @@ pub fn sys_open(path_addr: usize, flags: OpenFlags) -> Option<Fd> {
             ops,
         }));
 
-        let fd = with_curr_proc_mut(|p| {
+        let fd = {
+            let p = curr_proc();
+            let mut p = p.lock();
+
             let entry = p.fd.vacant_key();
             p.fd.insert(file);
             entry as u64
-        });
+        };
 
         return Some(fd);
     }
@@ -74,7 +84,7 @@ pub fn sys_open(path_addr: usize, flags: OpenFlags) -> Option<Fd> {
 }
 
 pub fn sys_close(fd: Fd) {
-    with_curr_proc_mut(|p| {
-        p.fd.remove(fd as usize);
-    });
+    let p = curr_proc();
+    let mut p = p.lock();
+    p.fd.remove(fd as usize);
 }

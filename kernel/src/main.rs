@@ -4,6 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{task, vec};
 use conquer_once::spin::OnceCell;
@@ -45,8 +46,9 @@ use kernel::task::tty::init_console_char_queue;
 use kernel::task::Task;
 use kernel::{
     driver::mouse, driver::serial, hlt_loop, init, mem::allocator, mem::memory, println,
-    serial_print, serial_println, BootInfo, RawBootInfo, BOOT_INFO, PROC, SCREEN,
+    serial_print, serial_println, KernelInfo, RawBootInfo, KERNEL_CONFIG, PROC, SCREEN,
 };
+use kernel::{ALLOC, PHYS_MEM_OFFSET};
 use spin::Mutex;
 use volatile::Volatile;
 use x86_64::instructions::interrupts::without_interrupts;
@@ -70,7 +72,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     serial_println!("{:#?}", boot_info);
     let phys_offset = boot_info.physical_memory_offset;
     let screen_virt = boot_info.screen_phys_addr + phys_offset;
-    let mut screen = unsafe { (*(screen_virt as *const BootScreenInfo)).clone() };
+    let screen = unsafe { (*(screen_virt as *const BootScreenInfo)).clone() };
 
     let mem_map_virt = boot_info.mem_map_phys_addr + phys_offset;
     let mem_map: &'static mut [MemoryMapEntry] = unsafe {
@@ -88,21 +90,17 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         },
     );
 
-    let boot_info = BootInfo {
-        allocator,
+    let boot_info = KernelInfo {
         page_table_address: boot_info.l4_table_phys_addr,
-        physical_memory_offset: phys_offset,
-        kernel_base_virt: boot_info.kernel_base_virt,
     };
 
-    BOOT_INFO.init_once(|| Mutex::new(boot_info));
+    KERNEL_CONFIG.init_once(|| boot_info);
+    ALLOC.init_once(|| Mutex::new(allocator));
 
     {
-        let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
-
-        let mut mapper = unsafe { memory::init(VirtAddr::new(boot_info.physical_memory_offset)) };
-        allocator::init_heap(&mut mapper, &mut boot_info.allocator)
-            .expect("heap initialization failed");
+        let mut alloc = ALLOC.get().unwrap().lock();
+        let mut mapper = unsafe { memory::init(VirtAddr::new(PHYS_MEM_OFFSET)) };
+        allocator::init_heap(&mut mapper, &mut *alloc).expect("heap initialization failed");
 
         let screen = Screen::new(screen);
         SCREEN.init_once(|| Mutex::new(screen));
@@ -145,7 +143,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         }
     }
 
-    PROC.init_once(|| Mutex::new(Vec::<ProcessControlBlock>::with_capacity(15)));
+    PROC.init_once(|| Mutex::new(Vec::<Arc<Mutex<ProcessControlBlock>>>::with_capacity(15)));
 
     init_rand();
     init_vfs();
@@ -213,19 +211,18 @@ fn compositor_task() {
 
         // paint each proccess backbuffer, for now there's no z-index
         for curr_proc in procs.iter() {
+            let curr_proc = curr_proc.lock();
             serial_println!("{}", curr_proc.adsp.backbuffer_frames.is_none());
             if let Some(bb_frames) = &curr_proc.adsp.backbuffer_frames {
                 serial_println!("Painting frame!");
-                let boot_info = BOOT_INFO.get().unwrap().lock();
                 let mut screen = SCREEN.get().unwrap().lock();
                 let mut bytes_remaining = screen.buffer_mut().len();
                 for (i, frame) in bb_frames.iter().enumerate() {
                     // copy this physical frame to our LFB
                     let offset = i * 4096;
-                    let frame_ptr: *mut u8 = VirtAddr::new(
-                        frame.start_address().as_u64() + boot_info.physical_memory_offset,
-                    )
-                    .as_mut_ptr();
+                    let frame_ptr: *mut u8 =
+                        VirtAddr::new(frame.start_address().as_u64() + PHYS_MEM_OFFSET)
+                            .as_mut_ptr();
                     let main_back_buffer = screen.back_lfb.as_mut_ptr();
                     let bytes_to_copy = core::cmp::min(4096, bytes_remaining);
                     unsafe {
@@ -254,6 +251,7 @@ fn cleaner_task() {
                     false
                 }
             });
+
             if let Some(task_index) = task_index {
                 Some(scheduler.threads.remove(task_index))
             } else {

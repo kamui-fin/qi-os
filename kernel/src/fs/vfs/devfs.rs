@@ -102,11 +102,19 @@ impl INodeOps for DevFsDir {
         devnode_map
             .lock()
             .iter()
-            .map(|e| DEntryMinimal {
-                name: e.0.clone(),
-                inum: e.1.inum,
-                size: e.1.meta.lock().size,
-                filetype: NodeType::CharDevice,
+            .map(|e| {
+                let mut name_buf = [0u8; 64];
+                let e_name = e.0.clone();
+                let name_bytes = e_name.as_bytes();
+                let copy_len = name_bytes.len().min(64);
+                name_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+                DEntryMinimal {
+                    name: name_buf,
+                    inum: e.1.inum,
+                    size: e.1.meta.lock().size,
+                    filetype: NodeType::CharDevice,
+                }
             })
             .collect()
     }

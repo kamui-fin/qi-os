@@ -20,17 +20,21 @@ use crate::fs::vfs::StatusFlags;
 use crate::interrupts;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
+use crate::task::proc::curr_proc;
 use crate::task::proc::exec;
 use crate::task::proc::fork;
-use crate::task::proc::with_curr_proc;
-use crate::task::proc::with_curr_proc_mut;
+use crate::task::proc::wait_pid;
 use crate::task::proc::MAX_FD;
 use crate::task::thread::nano_sleep;
 use crate::task::thread::terminate_task;
 use crate::task::thread::yield_sched;
+use crate::task::thread::BlockReason;
+use crate::task::thread::ThreadState;
 use crate::task::thread::SCHEDULER;
 use crate::UtsName;
-use crate::BOOT_INFO;
+use crate::ALLOC;
+use crate::KERNEL_CONFIG;
+use crate::PHYS_MEM_OFFSET;
 use crate::PROC;
 use crate::SCREEN;
 use crate::UNAME;
@@ -54,6 +58,9 @@ use x86_64::structures::paging::PageTableFlags;
 use x86_64::structures::paging::Size4KiB;
 
 use x86_64::VirtAddr;
+
+// This is the starting virt addr within user proc that we'll map any shm into
+const MMAP_BASE: usize = 0x0000_4000_0000_0000;
 
 use crate::{
     serial_println,
@@ -203,6 +210,7 @@ enum SysCallKind {
 
     Fork,
     Exec,
+    WaitPid,
 
     Yield,
     Exit,
@@ -242,6 +250,8 @@ impl From<usize> for SysCallKind {
 
             18 => Self::Fork,
             28 => Self::Exec,
+            29 => Self::WaitPid,
+
             19 => Self::Yield,
             20 => Self::Exit,
             21 => Self::GetPid,
@@ -291,6 +301,13 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             exec(prgrm_name, argv, argc, trap_frame);
             0
         }
+        SysCallKind::WaitPid => {
+            let pid = arg1 as u64;
+            serial_println!("Waiting for child...");
+            wait_pid(pid);
+            serial_println!("Done! I'm back!");
+            0
+        }
         SysCallKind::Open => {
             // arg1: pathname *const c_cstr
             // arg2: flags
@@ -307,16 +324,14 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg3: len (usize)
             serial_println!("Reading from {} {}", arg1, arg3);
             let buffer = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3) };
-            sys_read(arg1 as u64, buffer);
-            0
+            sys_read(arg1 as u64, buffer)
         }
         SysCallKind::Write => {
             // arg1: fd (u64)
             // arg2: buffer *u8
             // arg3: len (usize)
             let buffer = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3) };
-            sys_write(arg1 as u64, buffer);
-            0
+            sys_write(arg1 as u64, buffer)
         }
         SysCallKind::Chdir => {
             // arg1: path *const c_char
@@ -324,9 +339,10 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 .to_str()
                 .unwrap();
             let dentry = find_dentry(path).unwrap();
-            with_curr_proc_mut(|proc| {
-                proc.cwd = dentry;
-            });
+
+            let p = curr_proc();
+            let mut p = p.lock();
+            p.cwd = dentry;
 
             0
         }
@@ -356,10 +372,10 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Fstat => {
             // arg1: fd (u64)
             // arg2: *mut Stat
-            let stat = with_curr_proc(|p| {
-                let file = p.fd.get(arg1 as usize).unwrap().lock();
-                file.inode.ops.stat(&file.inode)
-            });
+            let p = curr_proc();
+            let p = p.lock();
+            let file = p.fd.get(arg1 as usize).unwrap().lock();
+            let stat = file.inode.ops.stat(&file.inode);
 
             let user_stat = arg1 as *mut Stat;
             unsafe { ptr::copy(&stat as *const Stat, user_stat, 1) };
@@ -381,21 +397,21 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         }
         SysCallKind::Dup => {
             // arg1: oldfd u64
-            with_curr_proc_mut(|p| {
-                let oldfd = p.fd.get(arg1).unwrap();
-                let lowest_fd = (0..MAX_FD).find(|i| p.fd.contains(*i)).unwrap();
-                p.fd[lowest_fd] = oldfd.clone();
-                lowest_fd
-            })
+            let p = curr_proc();
+            let mut p = p.lock();
+            let oldfd = p.fd.get(arg1).unwrap();
+            let lowest_fd = (0..MAX_FD).find(|i| p.fd.contains(*i)).unwrap();
+            p.fd[lowest_fd] = oldfd.clone();
+            lowest_fd
         }
         SysCallKind::Dup2 => {
             // arg1: oldfd u64
             // arg2: newfd u64
             if arg1 != arg2 {
-                with_curr_proc_mut(|p| {
-                    let oldfd = p.fd.get(arg1).unwrap();
-                    p.fd[arg2] = oldfd.clone();
-                });
+                let p = curr_proc();
+                let mut p = p.lock();
+                let oldfd = p.fd.get(arg1).unwrap();
+                p.fd[arg2] = oldfd.clone();
             }
 
             arg2
@@ -413,23 +429,25 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Getcwd => {
             // arg1: buffer *u8
             // arg2: len (usize)
-            let abs_cwd = with_curr_proc(|p| full_path(p.cwd.clone()));
-            let abs_cwd = CString::from_str(&abs_cwd).unwrap();
-            let ptr = arg1 as *mut c_char;
-            unsafe { ptr::copy_nonoverlapping(abs_cwd.as_ptr(), ptr, arg2) };
+            let p = curr_proc();
+            let p = p.lock();
+            let abs_cwd = full_path(p.cwd.clone());
+            let ptr = arg1 as *mut u8;
+            let copy_len = core::cmp::min(arg2, abs_cwd.len());
+            unsafe { ptr::copy_nonoverlapping(abs_cwd.as_ptr(), ptr, copy_len) };
 
-            0
+            copy_len
         }
         SysCallKind::Lseek => {
             // arg1: fd u64
             // arg2: offset usize
             // arg3 (for now we won't implement): whence (SEEK_START, SEEK_CUR, SEEK_END) like starting from where
-            with_curr_proc_mut(|p| {
-                let mut file = p.fd[arg1].lock();
-                let pos = file.pos;
-                let new_pos = core::cmp::min(file.inode.meta.lock().size, pos + arg2);
-                file.pos = new_pos;
-            });
+            let p = curr_proc();
+            let p = p.lock();
+            let mut file = p.fd[arg1].lock();
+            let pos = file.pos;
+            let new_pos = core::cmp::min(file.inode.meta.lock().size, pos + arg2);
+            file.pos = new_pos;
 
             0
         }
@@ -437,10 +455,11 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd u64
             // arg2: addr of *mut DEntryMinimal
             // arg3: count usize
-            let (entries, offset) = with_curr_proc(|p| {
-                let file = p.fd.get(arg1 as usize).unwrap().lock();
-                (file.inode.ops.readdir(&file.inode), file.pos)
-            });
+            let p = curr_proc();
+            let p = p.lock();
+            let file = p.fd.get(arg1 as usize).unwrap().lock();
+            let entries = file.inode.ops.readdir(&file.inode);
+            let offset = file.pos;
 
             let user_dentry = arg2 as *mut DEntryMinimal;
 
@@ -461,10 +480,10 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd u64
             // arg2: request u64
             // arg3: args void*
-            with_curr_proc_mut(|p| {
-                let fd = p.fd.get(arg1).unwrap().lock();
-                fd.ops.ioctl(arg2 as u64, arg3 as u64);
-            });
+            let p = curr_proc();
+            let p = p.lock();
+            let fd = p.fd.get(arg1).unwrap().lock();
+            fd.ops.ioctl(arg2 as u64, arg3 as u64);
 
             0
         }
@@ -480,15 +499,15 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 _ => unimplemented!(),
             };
 
+            let p = curr_proc();
+            let p = p.lock();
             match cmd {
-                FcntlCommand::SetFlags(flags) => with_curr_proc_mut(|p| {
+                FcntlCommand::SetFlags(flags) => {
                     let mut fd = p.fd.get(arg1).unwrap().lock();
                     fd.set_status(StatusFlags::from_bits_truncate(flags));
                     0
-                }),
-                FcntlCommand::GetFlags => {
-                    with_curr_proc(|p| u64::from(p.fd.get(arg1).unwrap().lock().flags)) as usize
                 }
+                FcntlCommand::GetFlags => u64::from(p.fd.get(arg1).unwrap().lock().flags) as usize,
             }
         }
         SysCallKind::Pipe => {
@@ -523,17 +542,17 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 ops: Arc::new(PipeOps),
             }));
 
-            with_curr_proc_mut(|p| {
-                let rfd = p.fd.insert(read_file) as u64;
-                let wfd = p.fd.insert(write_file) as u64;
-                let rfd_user = arg1 as *mut u64;
+            let p = curr_proc();
+            let mut p = p.lock();
+            let rfd = p.fd.insert(read_file) as u64;
+            let wfd = p.fd.insert(write_file) as u64;
+            let rfd_user = arg1 as *mut u64;
 
-                unsafe {
-                    let wfd_user = rfd_user.add(1);
-                    *rfd_user = rfd;
-                    *wfd_user = wfd;
-                }
-            });
+            unsafe {
+                let wfd_user = rfd_user.add(1);
+                *rfd_user = rfd;
+                *wfd_user = wfd;
+            }
 
             0
         }
@@ -591,14 +610,9 @@ fn sys_get_unix_time() -> usize {
 }
 
 fn sys_alloc(arg1: usize) -> usize {
-    let mut boot_info = BOOT_INFO.get().expect("Boot info not initialized").lock();
     // arg1: size
-    let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-    let mut procs = PROC.get().unwrap().lock();
-    let curr_proc = procs
-        .iter_mut()
-        .find(|p| p.tcb.lock().id == curr_thread_id)
-        .unwrap();
+    let curr_proc = curr_proc();
+    let mut curr_proc = curr_proc.lock();
 
     let old_heap_end = curr_proc.adsp.heap_end;
     let new_heap_end = old_heap_end + arg1;
@@ -610,18 +624,13 @@ fn sys_alloc(arg1: usize) -> usize {
         let start_page = Page::<Size4KiB>::containing_address(old_mapped_end);
         let end_page = Page::<Size4KiB>::containing_address(new_mapped_end - 1u64);
 
-        let mut mapper = curr_proc
-            .adsp
-            .get_page_table(boot_info.physical_memory_offset);
+        let mut mapper = curr_proc.adsp.get_page_table(PHYS_MEM_OFFSET);
         // map pages in-between
         for page in Page::range_inclusive(start_page, end_page) {
-            let frame = boot_info
-                .allocator
-                .allocate_frame()
-                .expect("proc_init: out of mem");
+            let mut alloc = ALLOC.get().unwrap().lock();
+            let frame = alloc.allocate_frame().expect("proc_init: out of mem");
             let frame_ptr: *mut u8 =
-                VirtAddr::new(frame.start_address().as_u64() + boot_info.physical_memory_offset)
-                    .as_mut_ptr();
+                VirtAddr::new(frame.start_address().as_u64() + PHYS_MEM_OFFSET).as_mut_ptr();
             // clear frame
             unsafe {
                 core::ptr::write_bytes(frame_ptr, 0, 4096);
@@ -635,7 +644,7 @@ fn sys_alloc(arg1: usize) -> usize {
                         PageTableFlags::WRITABLE
                             | PageTableFlags::PRESENT
                             | PageTableFlags::USER_ACCESSIBLE,
-                        &mut boot_info.allocator,
+                        &mut *alloc,
                     )
                     .expect("(fixed offset mapping): unable to map frame")
             };
@@ -658,24 +667,13 @@ fn sys_frame_ready() {
 }
 
 fn sys_alloc_back_buffer(arg1: usize) {
+    let curr_proc = curr_proc();
+    let mut curr_proc = curr_proc.lock();
+
     // get the length of LFB and allocate needed frames, zero out, map into userspace
-
-    // This is the starting virt addr within user proc that we'll map any shm into
-    const MMAP_BASE: usize = 0x0000_4000_0000_0000;
-
-    let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-    let mut procs = PROC.get().unwrap().lock();
-    let curr_proc = procs
-        .iter_mut()
-        .find(|p| p.tcb.lock().id == curr_thread_id)
-        .unwrap();
-
-    let mut boot_info = BOOT_INFO.get().unwrap().lock();
     let screen = SCREEN.get().unwrap().lock();
     // not seeing any prints after here???
-    let mut mapper = curr_proc
-        .adsp
-        .get_page_table(boot_info.physical_memory_offset);
+    let mut mapper = curr_proc.adsp.get_page_table(PHYS_MEM_OFFSET);
     let buffer_num_bytes = screen.bytes_per_line * screen.height;
 
     let num_frames = buffer_num_bytes.div_ceil(4096);
@@ -684,17 +682,14 @@ fn sys_alloc_back_buffer(arg1: usize) {
     let end_page = start_page + num_frames as u64;
 
     let mut backbuffer_frames = Vec::new();
+    let mut alloc = ALLOC.get().unwrap().lock();
     for page in Page::range(start_page, end_page) {
-        let frame = boot_info
-            .allocator
-            .allocate_frame()
-            .expect("proc_init: out of mem");
+        let frame = alloc.allocate_frame().expect("proc_init: out of mem");
 
         backbuffer_frames.push(frame);
 
         let frame_ptr: *mut u8 =
-            VirtAddr::new(frame.start_address().as_u64() + boot_info.physical_memory_offset)
-                .as_mut_ptr();
+            VirtAddr::new(frame.start_address().as_u64() + PHYS_MEM_OFFSET).as_mut_ptr();
         // clear frame
         unsafe {
             core::ptr::write_bytes(frame_ptr, 0, 4096);
@@ -707,7 +702,7 @@ fn sys_alloc_back_buffer(arg1: usize) {
                     PageTableFlags::WRITABLE
                         | PageTableFlags::PRESENT
                         | PageTableFlags::USER_ACCESSIBLE,
-                    &mut boot_info.allocator,
+                    &mut *alloc,
                 )
                 .expect("(fixed offset mapping): unable to map frame")
         };
@@ -726,13 +721,9 @@ fn sys_alloc_back_buffer(arg1: usize) {
 }
 
 fn sys_get_pid() -> usize {
-    let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-    let procs = PROC.get().unwrap().lock();
-    let curr_proc = procs
-        .iter()
-        .find(|p| p.tcb.lock().id == curr_thread_id)
-        .unwrap();
-    curr_proc.pid as usize
+    let p = curr_proc();
+    let p = p.lock();
+    p.pid as usize
 }
 
 fn sys_spawn(arg1: usize, arg2: usize, arg3: usize) {
@@ -742,14 +733,45 @@ fn sys_spawn(arg1: usize, arg2: usize, arg3: usize) {
 
 fn sys_exit(arg1: usize) {
     let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
-    {
+    let parent_id = {
         let mut procs = PROC.get().unwrap().lock();
         let curr_proc_index = procs
             .iter()
-            .position(|p| p.tcb.lock().id == curr_thread_id)
+            .position(|p| p.lock().pid == curr_thread_id)
             .unwrap();
-        procs.remove(curr_proc_index);
+        procs.remove(curr_proc_index).lock().parent
+    };
+
+    // notify parent
+    if let Some(parent_id) = parent_id {
+        serial_println!("Checking if parent is waiting...");
+        let unblock_parent = {
+            let scheduler = SCHEDULER.lock();
+            let parent_proc = &scheduler
+                .threads
+                .iter()
+                .find(|t| t.lock().id == parent_id as u64)
+                .unwrap()
+                .lock()
+                .state;
+            serial_println!("{:#?}", parent_proc);
+            if let ThreadState::Blocked(BlockReason::WaitThread(child_pid)) = parent_proc {
+                if *child_pid == curr_thread_id as u64 {
+                    serial_println!("MUST NOTIFY PARENT THAT I DIED");
+                    Some(parent_id)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(parent_id) = unblock_parent {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.unblock_task(parent_id);
+        }
     }
+
     serial_println!("Exiting {curr_thread_id} with status {arg1}");
     terminate_task(arg1 as u8);
 }

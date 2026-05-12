@@ -9,10 +9,10 @@ use core::sync::atomic::AtomicU64;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::ffi::c_str;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
-use alloc::vec;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use bitfield_struct::bitfield;
 use bitflags;
 use conquer_once::spin::OnceCell;
@@ -27,7 +27,7 @@ use crate::fs::fat::{BlockDevice, DirEntryWithLoc, FSInfo, Fat32, BPB};
 use crate::fs::ustar::USTAR;
 use crate::fs::vfs::devfs::mount_devfs;
 use crate::fs::vfs::pipe::Pipe;
-use crate::task::proc::{with_curr_proc, with_curr_proc_mut};
+use crate::task::proc::curr_proc;
 use crate::task::thread::{block_task, block_task_drop_lock, BlockReason, ThreadState, SCHEDULER};
 use crate::{serial_println, PROC};
 
@@ -122,7 +122,7 @@ pub struct DEntry {
 
 #[derive(Clone)]
 pub struct DEntryMinimal {
-    pub name: String,
+    pub name: [u8; 64],
     pub inum: u64,
     pub filetype: NodeType,
     pub size: usize,
@@ -248,7 +248,8 @@ pub fn full_path(dentry: Arc<RwLock<DEntry>>) -> String {
         break;
     }
     segments.reverse();
-    segments.join("/")
+
+    format!("/{}", &segments[1..].join("/"))
 }
 
 // NOTE: ensure sanitized to absolute paths before passed to VFS layer
@@ -281,15 +282,21 @@ pub fn find_parent_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
 
 pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
     // TODO: make sure path is abs or relative, if relative, combine with CWD
-    let path = path.trim();
-    let (mount, mp_root_path) = find_mountpoint(path);
+    let mut path = path.trim().to_string();
+
+    if !path.starts_with("/") {
+        // relative
+        path = join_path_with_cwd(&path);
+    }
+
+    let (mount, mp_root_path) = find_mountpoint(&path);
 
     let mut current = mount.root.clone();
 
     let rel_path = if mp_root_path == "/" {
-        path
+        &path
     } else {
-        path.strip_prefix(&mp_root_path).unwrap_or(path)
+        path.strip_prefix(&mp_root_path).unwrap_or(&path)
     };
 
     for segment in rel_path
@@ -333,6 +340,17 @@ pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
     }
 
     Some(current)
+}
+
+fn join_path_with_cwd(path: &str) -> String {
+    let p = curr_proc();
+    let p = p.lock();
+    let cwd = full_path(p.cwd.clone());
+    if cwd == "/" {
+        format!("{cwd}{path}")
+    } else {
+        format!("{cwd}/{path}")
+    }
 }
 
 pub fn mount_fat32(table: &mut MountTable, mount_path: &str) {

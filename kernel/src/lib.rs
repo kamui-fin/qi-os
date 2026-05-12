@@ -41,9 +41,17 @@ lazy_static! {
     };
 }
 
-pub static BOOT_INFO: OnceCell<Mutex<BootInfo>> = OnceCell::uninit();
 pub static SCREEN: OnceCell<Mutex<Screen>> = OnceCell::uninit();
-pub static PROC: OnceCell<Mutex<Vec<ProcessControlBlock>>> = OnceCell::uninit();
+
+pub static PROC: OnceCell<Mutex<Vec<Arc<Mutex<ProcessControlBlock>>>>> = OnceCell::uninit();
+
+// immutable
+pub static KERNEL_CONFIG: OnceCell<KernelInfo> = OnceCell::uninit();
+
+// isolating out more mutex resources
+pub static ALLOC: OnceCell<Mutex<BumpAllocator>> = OnceCell::uninit();
+pub const PHYS_MEM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
+pub const KERN_BASE_VIRT: u64 = 0xFFFFFFFF80000000;
 
 // nodename - hardcoded due to lack of network support
 // machine - hardcoded due to only support for x86_64
@@ -57,11 +65,8 @@ pub struct UtsName {
 }
 
 #[derive(Debug)]
-pub struct BootInfo {
-    pub allocator: BumpAllocator,
+pub struct KernelInfo {
     pub page_table_address: u64,
-    pub physical_memory_offset: u64,
-    pub kernel_base_virt: u64,
 }
 
 #[repr(C)]

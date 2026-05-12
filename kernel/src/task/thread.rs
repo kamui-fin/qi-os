@@ -8,8 +8,8 @@ use core::{
 };
 use spin::Mutex;
 
-use crate::driver::serial;
 use crate::task::lock::{SimpleIrqLock, IRQ_DISABLE_COUNTER, NEEDS_RESCHEDULE};
+use crate::{driver::serial, task::proc::ProcessControlBlock};
 use crate::{
     interrupts::{ELAPSED, TIME_SLICE},
     serial_println,
@@ -37,6 +37,7 @@ pub enum BlockReason {
     CompositorWait,
     WaitPipeRead(u64),
     WaitPipeWrite(u64),
+    WaitThread(u64),
     WaitStdin(u8),
     TtyRenderWait,
     AsyncExecutorWait,
@@ -53,7 +54,6 @@ pub enum ThreadState {
 pub type ThreadId = u64;
 
 #[repr(C)]
-#[derive(Debug)]
 pub struct ThreadControlBlock {
     pub rsp: *const usize,
     pub rsp0: *const usize, // kernel stack pointer to use when entering kernel
@@ -62,6 +62,8 @@ pub struct ThreadControlBlock {
     pub id: ThreadId,
     pub stack: Box<[usize]>,
     pub time_slice_remaining: usize, // resets to 100 ms upon context switch
+
+    pub pcb: Option<Arc<Mutex<ProcessControlBlock>>>,
 }
 
 pub const KERNEL_STACK_SIZE: usize = 1 * Size2MiB::SIZE as usize;
@@ -118,6 +120,7 @@ impl ThreadControlBlock {
             state: ThreadState::Ready,
             time_slice_remaining: TIME_SLICE,
             id,
+            pcb: None,
         }
     }
 
@@ -135,7 +138,8 @@ impl ThreadControlBlock {
 
         Self {
             stack: Box::new([]),
-            rsp: rsp,
+            pcb: None,
+            rsp,
             rsp0: rsp,
             cr3,
             state: ThreadState::Running,
