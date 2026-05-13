@@ -2,6 +2,7 @@ use core::fmt::{self, Write};
 
 use spin::{Mutex, Once};
 use uart_16550::SerialPort;
+use x86_64::instructions::interrupts::without_interrupts;
 
 static SERIAL_DBG: Once<Mutex<SerialPort>> = Once::new();
 
@@ -26,5 +27,8 @@ macro_rules! serial_println {
 
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
+    without_interrupts(|| {
+
     SERIAL_DBG.wait().unwrap().lock().write_fmt(args).unwrap();
+    })
 }

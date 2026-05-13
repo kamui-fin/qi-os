@@ -353,7 +353,7 @@ impl<D: BlockDevice> Fat32<D> {
     fn read_dir_from_cluster(&self, start_cluster: u32) -> Vec<DirEntryWithLoc> {
         let mut entries = vec![];
         let mut cluster = start_cluster;
-        while !is_eoc(cluster) {
+        while is_valid_next(cluster) {
             // read data in cluster
             let lba = self.cluster_to_lba(cluster);
             let cluster_size = 512 * self.bpb.sectors_per_cluster as usize;

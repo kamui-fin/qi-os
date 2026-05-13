@@ -72,14 +72,16 @@ pub async fn print_mouse_movement() {
     let mut x = 0 as i32;
     let mut y = 0 as i32;
     while let Some(packet) = packets.next().await {
-        let screen = SCREEN.get().unwrap().lock();
-
         // draw cursor
         x += packet.get_x() as i32;
         y -= packet.get_y() as i32;
 
+    {
+
+        let screen = SCREEN.get().unwrap().lock();
         x = x.clamp(0, screen.width as i32);
         y = y.clamp(0, screen.height as i32);
+        }
 
         let point = Point::new(x as i32, y as i32);
         serial_println!("{:#?}", point);

@@ -1,22 +1,21 @@
 # Roadmap
 
-- fix all deadlocks
-    - refactor to fine-grained locks
-    - hardcode e.g. physical memory offset (NO NEED FOR LOCK)
-- wait queues
-- Shell
-    - env var
-- unit + integration testing setup
-    - Kernel debugger (quit & dump useful info on key press)
-- buddy + slab allocator
+- Complete shell functionality
 - proper error handling
-- more concurrency:
+- Parallelism:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
 
+--- 
 
+- unit + integration testing setup
+    - Kernel debugger (quit & dump useful info on key press)
+- wait queues
+- buddy + slab allocator
+
+---
 
 Wayyy into future:
 - sound
