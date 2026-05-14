@@ -11,7 +11,6 @@ use futures_util::stream::Stream;
 use futures_util::task::AtomicWaker;
 use lazy_static::lazy_static;
 use spin::Mutex;
-use volatile::Volatile;
 use x86_64::structures::paging::PhysFrame;
 
 use crate::serial_println;

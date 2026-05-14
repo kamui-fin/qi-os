@@ -16,7 +16,7 @@ pc-keyboard = "0.7.0"
 pic8259 = "0.10.1"
 spin = "0.5.2"
 uart_16550 = "0.2.0"
-volatile = "0.2.6"
+volatile = "0.6.1"
 x86_64 = "0.14.2"
 log = { version = "0.4.17", default-features = false }
 bitfield-struct = "0.11"
@@ -52,3 +52,4 @@ features = ["alloc"]
 
 [build-dependencies]
 cc = "1.0"
+nasm-rs = "0.3"

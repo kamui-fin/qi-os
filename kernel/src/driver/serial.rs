@@ -28,7 +28,6 @@ macro_rules! serial_println {
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
     without_interrupts(|| {
-
-    SERIAL_DBG.wait().unwrap().lock().write_fmt(args).unwrap();
+        SERIAL_DBG.wait().unwrap().lock().write_fmt(args).unwrap();
     })
 }

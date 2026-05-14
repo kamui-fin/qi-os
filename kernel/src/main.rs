@@ -11,6 +11,7 @@ use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use core::ffi::c_char;
 use core::panic::PanicInfo;
+use core::ptr::NonNull;
 use crossbeam_queue::ArrayQueue;
 use elf::abi::PT_LOAD;
 use elf::endian::{AnyEndian, LittleEndian};
@@ -24,6 +25,7 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
+use kernel::acpi::{find_rsdp, get_rsdt, init_lapic, parse_madt_entries, Lapic, SdtHeader};
 use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, CONS};
 use kernel::driver::cmos::get_rtc_time;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
@@ -50,7 +52,7 @@ use kernel::{
 };
 use kernel::{ALLOC, PHYS_MEM_OFFSET};
 use spin::Mutex;
-use volatile::Volatile;
+use volatile::VolatilePtr;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
@@ -101,6 +103,10 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         let mut alloc = ALLOC.get().unwrap().lock();
         let mut mapper = unsafe { memory::init(VirtAddr::new(PHYS_MEM_OFFSET)) };
         allocator::init_heap(&mut mapper, &mut *alloc).expect("heap initialization failed");
+
+        // <--- mp
+        init_lapic();
+        // mp --->
 
         let screen = Screen::new(screen);
         SCREEN.init_once(|| Mutex::new(screen));

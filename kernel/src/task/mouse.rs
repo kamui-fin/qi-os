@@ -76,11 +76,10 @@ pub async fn print_mouse_movement() {
         x += packet.get_x() as i32;
         y -= packet.get_y() as i32;
 
-    {
-
-        let screen = SCREEN.get().unwrap().lock();
-        x = x.clamp(0, screen.width as i32);
-        y = y.clamp(0, screen.height as i32);
+        {
+            let screen = SCREEN.get().unwrap().lock();
+            x = x.clamp(0, screen.width as i32);
+            y = y.clamp(0, screen.height as i32);
         }
 
         let point = Point::new(x as i32, y as i32);

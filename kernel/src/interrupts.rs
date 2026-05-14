@@ -82,6 +82,7 @@ lazy_static! {
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault.set_handler_fn(gpf_handler);
         idt[InterruptIndex::PS2.as_usize()].set_handler_fn(mouse_interrupt_handler);
+        idt[0x40].set_handler_fn(test_apic_handler);
 
         unsafe {
             let handler_addr = VirtAddr::new(syscall_entry as usize as u64);
@@ -91,6 +92,15 @@ lazy_static! {
         }
         idt
     };
+}
+
+extern "x86-interrupt" fn test_apic_handler(_stack_frame: InterruptStackFrame) {
+    serial_println!("Hi from apic (CPU0)");
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::PS2.as_u8());
+    }
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
