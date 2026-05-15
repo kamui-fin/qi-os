@@ -43,6 +43,20 @@ lazy_static! {
     };
 }
 
+pub const BOOT_ASCII_ART: &'static str = r#"
+        $$\   $$\ $$\                                $$$$$$\  $$\        $$$$$$\   $$$$$$\
+        $$ |  $$ |\__|                              $$  __$$\ \__|      $$  __$$\ $$  __$$\
+        \$$\ $$  |$$\  $$$$$$\  $$$$$$$\   $$$$$$\  $$ /  $$ |$$\       $$ /  $$ |$$ /  \__|
+         \$$$$  / $$ | \____$$\ $$  __$$\ $$  __$$\ $$ |  $$ |$$ |      $$ |  $$ |\$$$$$$\
+         $$  $$<  $$ | $$$$$$$ |$$ |  $$ |$$ /  $$ |$$ |  $$ |$$ |      $$ |  $$ | \____$$\
+        $$  /\$$\ $$ |$$  __$$ |$$ |  $$ |$$ |  $$ |$$ $$\$$ |$$ |      $$ |  $$ |$$\   $$ |
+        $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$$  |
+        \__|  \__|\__| \_______|\__|  \__| \____$$ | \___$$$\ \__|       \______/  \______/
+                                          $$\   $$ |     \___|
+                                          \$$$$$$  |
+                                           \______/
+                "#;
+
 pub static SCREEN: OnceCell<Mutex<Screen>> = OnceCell::uninit();
 
 pub static PROC: OnceCell<Mutex<Vec<Arc<Mutex<ProcessControlBlock>>>>> = OnceCell::uninit();
@@ -85,13 +99,6 @@ pub struct RawBootInfo {
     pub mem_map_entry_count: usize,
     pub l4_table_phys_addr: u64,
     pub free_memory_start_phys: u64,
-}
-
-pub fn init() {
-    crate::driver::serial::init();
-    crate::mem::gdt::init();
-    crate::interrupts::init_idt();
-    unsafe { crate::interrupts::PICS.lock().initialize() };
 }
 
 pub fn hlt_loop() -> ! {

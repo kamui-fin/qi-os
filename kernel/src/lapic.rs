@@ -1,10 +1,24 @@
 use crate::acpi::{find_rsdp, get_rsdt, SdtHeader};
-use crate::{serial_println, PHYS_MEM_OFFSET};
+use crate::mem::gdt::{init_gdt, new_gdt, new_tss, Selectors};
+use crate::task::lock::SimpleIrqLock;
+use crate::task::proc::ProcessControlBlock;
+use crate::task::thread::{Scheduler, ThreadControlBlock};
+use crate::{hlt_loop, serial_println, PHYS_MEM_OFFSET};
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use conquer_once::spin::OnceCell;
 use core::ptr::NonNull;
+use core::slice::Iter;
+use lazy_static;
+use spin::Mutex;
 use volatile::VolatilePtr;
 use x86_64::registers::control::Cr3;
+use x86_64::registers::model_specific::GsBase;
+use x86_64::structures::gdt::GlobalDescriptorTable;
+use x86_64::structures::tss::TaskStateSegment;
+use x86_64::VirtAddr;
 
 // Local APIC registers
 const ID: u32 = 0x0020; // ID
@@ -89,6 +103,37 @@ pub struct InterruptSourceOverrideEntry {
     pub irq_source: u8,
     pub global_system_interrupt: u32,
     pub flags: u16,
+}
+
+pub fn get_lapic() -> Lapic {
+    let rsdp = find_rsdp();
+    let sdt = get_rsdt(&rsdp);
+    let madt_header = sdt.find_madt().unwrap();
+    let start = (madt_header as *const SdtHeader as u64) + core::mem::size_of::<SdtHeader>() as u64;
+    let ptr = start as *const MadtPrologue;
+    let prologue = unsafe { &*ptr };
+    Lapic::new(prologue.local_apic_addr as u64)
+}
+
+pub fn mycpu() -> &'static mut Cpu {
+    let cpu_ptr = GsBase::read().as_u64() as *mut Cpu;
+    unsafe { &mut *cpu_ptr }
+}
+
+fn setup_cpu(apic_id: u8) {
+    let tss_boxed = Box::new(new_tss());
+    let tss: &'static TaskStateSegment = Box::leak(tss_boxed);
+
+    let (gdt, selectors) = new_gdt(tss);
+    let cpu = Box::new(Cpu {
+        apic_id: apic_id as u8,
+        ready: false,
+        tss,
+        gdt,
+        selectors,
+    });
+    let cpu_raw = Box::into_raw(cpu);
+    GsBase::write(VirtAddr::new(cpu_raw as u64));
 }
 
 pub fn parse_madt_entries(start: u64, length: u64) -> (MadtPrologue, Vec<MadtEntryData>) {
@@ -179,7 +224,87 @@ pub struct TrampolineData {
     apic_id: u64,
 }
 
-pub fn init_lapic() {
+static IOAPIC: OnceCell<IOApic> = OnceCell::uninit();
+
+const T_IRQ0: usize = 0x20;
+
+const REG_ID: usize = 0x00; // Register index: ID
+const REG_VER: usize = 0x01; // Register index: version
+const REG_TABLE: usize = 0x10; // Redirection table base
+
+// The redirection table starts at REG_TABLE and uses
+// two registers to configure each interrupt.
+// The first (low) register in a pair contains configuration bits.
+// The second (high) register contains a bitmask telling which
+// CPUs can serve that interrupt.
+const INT_DISABLED: usize = 0x00010000; // Interrupt disabled
+const INT_LEVEL: usize = 0x00008000; // Level-triggered (vs edge-)
+const INT_ACTIVELOW: usize = 0x00002000; // Active low (vs high)
+const INT_LOGICAL: usize = 0x00000800; // Destination is CPU id (vs APIC ID)
+
+struct IOApic {
+    base: u64,
+    apic_id: u8,
+}
+
+impl IOApic {
+    fn new(io_apic_entry: IoApicEntry) -> Self {
+        Self {
+            base: io_apic_entry.io_apic_address as u64,
+            apic_id: io_apic_entry.io_apic_id,
+        }
+    }
+
+    pub fn write(&self, reg: u32, value: u32) {
+        let reg_addr =
+            unsafe { VolatilePtr::new(NonNull::new_unchecked((self.base as u64) as *mut u32)) };
+        reg_addr.write(reg);
+
+        let data_addr = unsafe {
+            VolatilePtr::new(NonNull::new_unchecked(
+                (self.base + 0x10 as u64) as *mut u32,
+            ))
+        };
+        data_addr.write(value);
+    }
+
+    pub fn read(&self, reg: u32) -> u32 {
+        let reg_addr =
+            unsafe { VolatilePtr::new(NonNull::new_unchecked((self.base as u64) as *mut u32)) };
+        reg_addr.write(reg);
+
+        let data_addr = unsafe {
+            VolatilePtr::new(NonNull::new_unchecked(
+                (self.base + 0x10 as u64) as *mut u32,
+            ))
+        };
+        data_addr.read()
+    }
+
+    pub fn init(&self) {
+        let max_intr = (self.read(REG_VER as u32) >> 16) & 0xFF;
+        let id = self.read(REG_ID as u32) >> 24;
+
+        if id != self.apic_id as u32 {
+            panic!("id isn't equal to ioapicid; not a MP");
+        }
+
+        for i in 0..=max_intr {
+            self.write(
+                (REG_TABLE as u32) + 2 * i,
+                (INT_DISABLED as u32) | ((T_IRQ0 as u32) + i),
+            );
+            self.write((REG_TABLE as u32) + 2 * i + 1, 0);
+        }
+    }
+
+    pub fn enable(&self, irq: u32, cpu_id: u32) {
+        self.write((REG_TABLE as u32) + 2 * irq, T_IRQ0 as u32 + irq);
+        self.write((REG_TABLE as u32) + 2 * irq + 1, cpu_id << 24);
+    }
+}
+
+pub fn find_cpus() -> (Lapic, Vec<MadtEntryData>) {
     let rsdp = find_rsdp();
     let sdt = get_rsdt(&rsdp);
     let madt_header = sdt.find_madt().unwrap();
@@ -187,63 +312,13 @@ pub fn init_lapic() {
         (madt_header as *const SdtHeader as u64) + core::mem::size_of::<SdtHeader>() as u64,
         madt_header.length as u64,
     );
+    (Lapic::new(prologue.local_apic_addr as u64), entries)
+}
 
-    // copy ap_init.asm into 0x8000
-    unsafe {
-        load_trampoline();
-    }
-
-    let lapic = Lapic::new(prologue.local_apic_addr as u64);
-
+pub fn init_lapic(lapic: &Lapic) -> u8 {
     lapic.write(SVR, ENABLE | 0xFF);
-
     let bsp = lapic.read(ID) as u8;
-
-    let cr3 = Cr3::read().0.start_address().as_u64() as u32;
-    let entry_addr = ap_startup as usize as u64;
-
-    // mailbox pattern
-    let boot_data = unsafe { &mut *(0x8F00 as *mut TrampolineData) };
-
-    for entry in entries {
-        if let MadtEntryData::LocalApic(LocalApicEntry {
-            processor_id: _,
-            apic_id,
-            flags: _,
-        }) = entry
-        {
-            if apic_id == bsp {
-                continue;
-            }
-
-            let proc_stack_top = allocate_stack_for_core(apic_id as usize);
-            boot_data.cr3 = cr3;
-            boot_data.stack_top = proc_stack_top;
-            boot_data.entry_addr = entry_addr;
-            boot_data.is_ready = 0;
-            boot_data.apic_id = apic_id as u64;
-
-            // send INIT (reset signal)
-            let icrhi = (apic_id as u32) << 24;
-            let icrlo = INIT;
-            lapic.write(ICRHI, icrhi);
-            lapic.write(ICRLO, icrlo);
-
-            while lapic.read(ICRLO) & DELIVS != 0 {}
-
-            // clear error status
-            lapic.write(ESR, 0);
-            // send STARTUP IPI
-            let icrhi = (apic_id as u32) << 24;
-            let icrlo = STARTUP | 0x8; // start executing at 0x8000
-            lapic.write(ICRHI, icrhi);
-            lapic.write(ICRLO, icrlo);
-
-            while unsafe { core::ptr::read_volatile(&boot_data.is_ready) } == 0 {
-                core::hint::spin_loop();
-            }
-        }
-    }
+    bsp
 }
 
 extern "C" {
@@ -256,14 +331,117 @@ unsafe fn load_trampoline() {
     let end = &trampoline_end as *const u8;
     let size = end as usize - start as usize;
 
-    let dest = 0x8000 as *mut u8;
+    let dest = (0x8000 + PHYS_MEM_OFFSET) as *mut u8;
     core::ptr::copy_nonoverlapping(start, dest, size);
+}
+
+pub struct Cpu {
+    pub apic_id: u8,
+    pub ready: bool,
+    pub tss: &'static TaskStateSegment,
+    pub gdt: GlobalDescriptorTable,
+    pub selectors: Selectors,
+    pub scheduler: SimpleIrqLock<Scheduler>, // proc: Option<Arc<Mutex<ProcessControlBlock>>> // or *mut ptr?
+                                             // curr_thread: Arc<Mutex<ThreadControlBlock>> // or *mut ptr?
+}
+
+lazy_static::lazy_static! {
+    pub static ref CPU: Vec<Cpu> = Vec::new();
 }
 
 #[no_mangle]
 pub extern "C" fn ap_startup(cpu_id: u64) -> ! {
     serial_println!("<<<< CPU {cpu_id} BOOTED UP! >>>>");
-    loop {
-        core::hint::spin_loop();
+
+    init_gdt(&mycpu().gdt, &mycpu().selectors);
+
+    let lapic = get_lapic();
+    init_lapic(&lapic);
+    cpu_common(cpu_id);
+}
+
+pub fn cpu_common(_cpu_id: u64) -> ! {
+    crate::interrupts::init_idt();
+    mycpu().ready = true;
+    serial_println!("Cpu {_cpu_id} booted up!");
+    // scheduler start
+    hlt_loop();
+}
+
+pub fn start_other_cpus(entries: Iter<MadtEntryData>, lapic: Lapic, bsp: u8) {
+    // copy ap_init.asm into 0x8000
+    unsafe {
+        load_trampoline();
     }
+
+    let cr3 = Cr3::read().0.start_address().as_u64() as u32;
+    let entry_addr = ap_startup as usize as u64;
+
+    // mailbox pattern
+    let boot_data = unsafe { &mut *((0x8F00 + PHYS_MEM_OFFSET) as *mut TrampolineData) };
+
+    for entry in entries {
+        match entry {
+            MadtEntryData::IoApic(data) => {
+                IOAPIC.try_get_or_init(|| IOApic::new(data.clone()));
+            }
+            MadtEntryData::LocalApic(data) => {
+                let apic_id = data.apic_id;
+                if apic_id == bsp {
+                    continue;
+                }
+
+                setup_cpu(apic_id);
+
+                let proc_stack_top = allocate_stack_for_core(apic_id as usize);
+                boot_data.cr3 = cr3;
+                boot_data.stack_top = proc_stack_top;
+                boot_data.entry_addr = entry_addr;
+                boot_data.is_ready = 0;
+                boot_data.apic_id = apic_id as u64;
+
+                // send INIT (reset signal)
+                let icrhi = (apic_id as u32) << 24;
+                let icrlo = INIT;
+                lapic.write(ICRHI, icrhi);
+                lapic.write(ICRLO, icrlo);
+
+                // wait 10ms
+
+                while lapic.read(ICRLO) & DELIVS != 0 {}
+
+                // clear error status
+                lapic.write(ESR, 0);
+                // send STARTUP IPI
+                let icrhi = (apic_id as u32) << 24;
+                let icrlo = STARTUP | 0x8; // start executing at 0x8000
+                lapic.write(ICRHI, icrhi);
+                lapic.write(ICRLO, icrlo);
+
+                // wait 200 us
+                //
+                // maybe send another STARTUP IPI?
+                // for now, this works with QEMU already
+
+                while unsafe { core::ptr::read_volatile(&boot_data.is_ready) } == 0 {
+                    core::hint::spin_loop();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn pic_disable() {
+    let mut io_pic1 = x86_64::instructions::port::Port::new(0x20 + 1); // Master (IRQs 0-7)
+    let mut io_pic2 = x86_64::instructions::port::Port::new(0xA0 + 1); // Slave (IRQs 8-15)
+
+    unsafe {
+        io_pic1.write(0xFF as u8);
+        io_pic2.write(0xFF as u8);
+    }
+}
+
+pub fn ioapic_init() {
+    IOAPIC.get().unwrap().init();
 }

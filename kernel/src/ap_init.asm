@@ -75,10 +75,12 @@ wait_for_bsp:
     mov gs, ax
 
     mov rsp, [STACK_OFFSET]
-    mov byte [READY_OFFSET], 1
 
     mov rax, [ENTRY_OFFSET]
     mov rdi, [APIC_ID_OFFSET]
+
+    mov byte [READY_OFFSET], 1
+
     jmp rax
 
 align 16

@@ -24,10 +24,6 @@ use x86_64::{
     VirtAddr,
 };
 
-lazy_static! {
-    pub static ref SCHEDULER: SimpleIrqLock<Scheduler> = SimpleIrqLock::new(Scheduler::new());
-}
-
 #[repr(C)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum BlockReason {

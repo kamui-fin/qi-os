@@ -25,14 +25,18 @@ use embedded_graphics::{
     text::Text,
 };
 use futures_util::{FutureExt, StreamExt};
-use kernel::acpi::{find_rsdp, get_rsdt, init_lapic, parse_madt_entries, Lapic, SdtHeader};
+use kernel::acpi::{find_rsdp, get_rsdt, SdtHeader};
 use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, CONS};
 use kernel::driver::cmos::get_rtc_time;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
 use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
+use kernel::lapic::{
+    cpu_common, find_cpus, init_lapic, ioapic_init, mycpu, pic_disable, start_other_cpus,
+};
 use kernel::mem::allocator::init_heap;
+use kernel::mem::gdt::init_gdt;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
@@ -47,10 +51,10 @@ use kernel::task::thread::{
 use kernel::task::tty::init_console_char_queue;
 use kernel::task::Task;
 use kernel::{
-    driver::mouse, driver::serial, hlt_loop, init, mem::allocator, mem::memory, println,
-    serial_print, serial_println, KernelInfo, RawBootInfo, KERNEL_CONFIG, PROC, SCREEN,
+    driver::mouse, driver::serial, hlt_loop, mem::allocator, mem::memory, println, serial_print,
+    serial_println, KernelInfo, RawBootInfo, KERNEL_CONFIG, PROC, SCREEN,
 };
-use kernel::{ALLOC, PHYS_MEM_OFFSET};
+use kernel::{interrupts, ALLOC, BOOT_ASCII_ART, PHYS_MEM_OFFSET};
 use spin::Mutex;
 use volatile::VolatilePtr;
 use x86_64::instructions::interrupts::without_interrupts;
@@ -67,14 +71,65 @@ extern crate alloc;
 
 #[no_mangle]
 pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
-    init();
+    init_gdt(&mycpu().gdt, &mycpu().selectors);
 
-    // 1. Get the BootInfo struct
+    kernel::driver::serial::init();
+    init_boot_info(boot_info);
+    init_kheap();
+
+    let (lapic, entries) = find_cpus();
+    let bsp = init_lapic(&lapic);
+    pic_disable();
+    ioapic_init();
+
+    init_screen(boot_info);
+    init_console_char_queue();
+    init_ttys();
+
+    kernel::driver::pit::init_pit(); // needs fixing?
+
+    mouse::init_ps2();
+    mouse::init_ps2_mouse();
+
+    init_kmain();
+    init_rand();
+    init_vfs();
+
+    start_other_cpus(lapic, bsp);
+    start_threads();
+
+    println!("{}", BOOT_ASCII_ART);
+
+    start_init_proc();
+
+    x86_64::instructions::interrupts::enable();
+    cpu_common(bsp as u64);
+}
+
+fn init_kheap() {
+    let mut alloc = ALLOC.get().unwrap().lock();
+    let mut mapper = unsafe { memory::init(VirtAddr::new(PHYS_MEM_OFFSET)) };
+    allocator::init_heap(&mut mapper, &mut *alloc).expect("heap initialization failed");
+}
+
+fn init_kmain() {
+    unsafe {
+        MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
+        CURR_THREAD_PTR = MAIN_THREAD;
+    }
+}
+
+fn start_threads() {
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.spawn(2, cleaner_task as *const ());
+    scheduler.spawn(3, compositor_task as *const ());
+    scheduler.spawn(4, async_executor_task as *const ());
+    scheduler.spawn(5, render_tty_task as *const ());
+}
+
+fn init_boot_info(boot_info: *mut RawBootInfo) {
     let boot_info = unsafe { &*(boot_info as *const RawBootInfo) };
-    serial_println!("{:#?}", boot_info);
     let phys_offset = boot_info.physical_memory_offset;
-    let screen_virt = boot_info.screen_phys_addr + phys_offset;
-    let screen = unsafe { (*(screen_virt as *const BootScreenInfo)).clone() };
 
     let mem_map_virt = boot_info.mem_map_phys_addr + phys_offset;
     let mem_map: &'static mut [MemoryMapEntry] = unsafe {
@@ -92,90 +147,28 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         },
     );
 
+    ALLOC.init_once(|| Mutex::new(allocator));
+
     let boot_info = KernelInfo {
         page_table_address: boot_info.l4_table_phys_addr,
     };
 
     KERNEL_CONFIG.init_once(|| boot_info);
-    ALLOC.init_once(|| Mutex::new(allocator));
+}
 
-    {
-        let mut alloc = ALLOC.get().unwrap().lock();
-        let mut mapper = unsafe { memory::init(VirtAddr::new(PHYS_MEM_OFFSET)) };
-        allocator::init_heap(&mut mapper, &mut *alloc).expect("heap initialization failed");
+fn init_screen(boot_info: *mut RawBootInfo) {
+    let boot_info = unsafe { &*(boot_info as *const RawBootInfo) };
+    let screen_virt = boot_info.screen_phys_addr + boot_info.physical_memory_offset;
+    let screen = unsafe { (*(screen_virt as *const BootScreenInfo)).clone() };
+    let screen = Screen::new(screen);
+    SCREEN.init_once(|| Mutex::new(screen));
+}
 
-        // <--- mp
-        init_lapic();
-        // mp --->
-
-        let screen = Screen::new(screen);
-        SCREEN.init_once(|| Mutex::new(screen));
-
-        init_console_char_queue();
-        init_ttys();
-
-        // Xiangqi OS boot message
-        println!(
-            r#"
-        $$\   $$\ $$\                                $$$$$$\  $$\        $$$$$$\   $$$$$$\
-        $$ |  $$ |\__|                              $$  __$$\ \__|      $$  __$$\ $$  __$$\
-        \$$\ $$  |$$\  $$$$$$\  $$$$$$$\   $$$$$$\  $$ /  $$ |$$\       $$ /  $$ |$$ /  \__|
-         \$$$$  / $$ | \____$$\ $$  __$$\ $$  __$$\ $$ |  $$ |$$ |      $$ |  $$ |\$$$$$$\
-         $$  $$<  $$ | $$$$$$$ |$$ |  $$ |$$ /  $$ |$$ |  $$ |$$ |      $$ |  $$ | \____$$\
-        $$  /\$$\ $$ |$$  __$$ |$$ |  $$ |$$ |  $$ |$$ $$\$$ |$$ |      $$ |  $$ |$$\   $$ |
-        $$ /  $$ |$$ |\$$$$$$$ |$$ |  $$ |\$$$$$$$ |\$$$$$$ / $$ |       $$$$$$  |\$$$$$$  |
-        \__|  \__|\__| \_______|\__|  \__| \____$$ | \___$$$\ \__|       \______/  \______/
-                                          $$\   $$ |     \___|
-                                          \$$$$$$  |
-                                           \______/
-                "#
-        );
-        println!("[ OK ] Heap initialized");
-
-        serial_println!("Qi OS booted up!\n");
-
-        kernel::driver::pit::init_pit();
-        println!("[ OK ] Timer setup");
-
-        unsafe {
-            mouse::init_ps2();
-            mouse::init_ps2_mouse();
-        }
-        println!("[ OK ] PS/2 Mouse initialized");
-
-        unsafe {
-            MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
-            CURR_THREAD_PTR = MAIN_THREAD;
-        }
-    }
-
+fn start_init_proc() {
     PROC.init_once(|| Mutex::new(Vec::<Arc<Mutex<ProcessControlBlock>>>::with_capacity(15)));
 
-    init_rand();
-    init_vfs();
-
-    serial_println!("Setup VFS!");
-
-    {
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn(2, cleaner_task as *const ());
-        scheduler.spawn(3, compositor_task as *const ());
-        scheduler.spawn(4, async_executor_task as *const ());
-        scheduler.spawn(5, render_tty_task as *const ());
-    }
-
-    println!("[ OK ] Started threads + async executor");
-    println!("Ready!");
-    println!("========================================================\n");
-
-    x86_64::instructions::interrupts::enable();
-
-    {
-        let args = [c"test".as_ptr()];
-        spawn_proc(c"shell", args.as_ptr(), 1);
-    }
-
-    hlt_loop();
+    let args = [c"test".as_ptr()];
+    spawn_proc(c"shell", args.as_ptr(), 1);
 }
 
 fn async_executor_task() {

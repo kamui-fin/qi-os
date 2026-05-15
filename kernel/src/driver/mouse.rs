@@ -160,7 +160,7 @@ pub unsafe fn get_device_id() -> Result<u8, &'static str> {
     read(0x60)
 }
 
-pub unsafe fn init_ps2() {
+pub fn init_ps2() {
     /* 1. Disable both ports
     2. Flush output buffer
     3. Read controller config (0x20)
@@ -170,35 +170,38 @@ pub unsafe fn init_ps2() {
     5. Write config back (0x60)
     6. Enable second port (0xA8) */
 
-    write(0x64, 0xAD); // disable keyboard port
-    write(0x64, 0xA7); // disable mouse port
-    flush_output_buffer();
+    unsafe {
+        write(0x64, 0xAD); // disable keyboard port
+        write(0x64, 0xA7); // disable mouse port
+        flush_output_buffer();
 
-    write(0x64, 0x20); // read controller conf
-    let data = read(0x60).unwrap() & !(1 << 0) & !(1 << 5) & !(1 << 1);
-    write(0x64, 0x60);
-    write(0x60, data);
+        write(0x64, 0x20); // read controller conf
+        let data = read(0x60).unwrap() & !(1 << 0) & !(1 << 5) & !(1 << 1);
+        write(0x64, 0x60);
+        write(0x60, data);
 
-    write(0x64, 0xAE); // enable keyboard
-    write(0x64, 0xA8); // enable mouse port
+        write(0x64, 0xAE); // enable keyboard
+        write(0x64, 0xA8); // enable mouse port
 
-    write(0x64, 0x20);
-    let data = (read(0x60).unwrap() | (1 << 0) | (1 << 1)) & !(1 << 5);
-    write(0x64, 0x60);
-    write(0x60, data);
+        write(0x64, 0x20);
+        let data = (read(0x60).unwrap() | (1 << 0) | (1 << 1)) & !(1 << 5);
+        write(0x64, 0x60);
+        write(0x60, data);
+    }
 }
 
-pub unsafe fn init_ps2_mouse() -> u8 {
-    reset();
-    read(0x60); // 0xAA
-    if let WaitSignal::Success = wait_read_signal() {
-        read(0x60); // optionally drain one more byte
-    }
+pub fn init_ps2_mouse() -> u8 {
+    unsafe {
+        reset();
+        read(0x60); // 0xAA
+        if let WaitSignal::Success = wait_read_signal() {
+            read(0x60); // optionally drain one more byte
+        }
 
-    disable_streaming();
-    let mouse_id = get_device_id().expect("Unable to fetch mouse ID");
-    set_defaults();
-    enable_streaming();
-
+        disable_streaming();
+        let mouse_id = get_device_id().expect("Unable to fetch mouse ID");
+        set_defaults();
+        enable_streaming();
     mouse_id
+    }
 }
