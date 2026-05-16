@@ -171,7 +171,8 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     {
         let args = [c"test".as_ptr()];
-        spawn_proc(c"shell", args.as_ptr(), 1);
+        //spawn_proc(c"shell", args.as_ptr(), 1);
+        spawn_proc(c"print_mouse_movement",args.as_ptr(),1);
     }
 
     hlt_loop();

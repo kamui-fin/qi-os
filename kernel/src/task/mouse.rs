@@ -25,7 +25,10 @@ use crate::driver::mouse::Ps2Flags;
 static WAKER: AtomicWaker = AtomicWaker::new();
 static PACKET_QUEUE: OnceCell<ArrayQueue<GenericPs2Packet>> = OnceCell::uninit();
 
-pub struct MouseDeviceHandle {}
+pub struct MouseDeviceHandle {
+    queue: Arc<ArrayQueue<GenericPs2Packet>>,
+
+}
 impl FileOps for MouseDeviceHandle {
     fn read(&self, _: &crate::fs::vfs::File, buffer: &mut [u8]) -> usize {
         let queue = PACKET_QUEUE.try_get().expect("not initialized");
@@ -37,7 +40,7 @@ impl FileOps for MouseDeviceHandle {
                     buffer[2] = packet.y_mov;
                     return 3;
                 }
-                else {
+                else {   
                     return 0;
                 }
             } else {
