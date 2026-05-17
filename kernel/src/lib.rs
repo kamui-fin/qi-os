@@ -14,6 +14,7 @@ use x86_64::{
 
 use crate::{
     graphics::{BootScreenInfo, Screen},
+    interrupts::PICS,
     mem::memory::BumpAllocator,
     task::proc::ProcessControlBlock,
 };
@@ -26,6 +27,7 @@ pub mod fs;
 pub mod graphics;
 pub mod interrupts;
 pub mod mem;
+pub mod pci;
 pub mod random;
 pub mod syscall;
 pub mod task;
@@ -89,7 +91,14 @@ pub fn init() {
     crate::driver::serial::init();
     crate::mem::gdt::init();
     crate::interrupts::init_idt();
-    unsafe { crate::interrupts::PICS.lock().initialize() };
+
+    unsafe {
+        let mut pics = PICS.lock();
+        pics.initialize();
+        let mut masks = pics.read_masks();
+        masks[1] &= !(1 << 3);
+        pics.write_masks(masks[0], masks[1]);
+    };
 }
 
 pub fn hlt_loop() -> ! {

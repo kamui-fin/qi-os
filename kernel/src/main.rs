@@ -32,6 +32,7 @@ use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::mem::allocator::init_heap;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
+use kernel::pci::{init_pci, pci_enumerate, CORB, CORBWP, HDA};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::lock::NEEDS_RESCHEDULE;
@@ -150,24 +151,54 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     serial_println!("Setup VFS!");
 
-    {
+    init_pci();
+    serial_println!("Enumerated PCI and initialized Intel HDA!");
+
+    /* {
         let mut scheduler = SCHEDULER.lock();
         scheduler.spawn(2, cleaner_task as *const ());
         scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
         scheduler.spawn(5, render_tty_task as *const ());
-    }
+    } */
 
-    println!("[ OK ] Started threads + async executor");
+    /* println!("[ OK ] Started threads + async executor");
     println!("Ready!");
-    println!("========================================================\n");
+    println!("========================================================\n"); */
 
     x86_64::instructions::interrupts::enable();
 
     {
+        /*
+        31........28 27.....20 19....8 7.....0
+        Codec Addr     Node ID   Verb     Payload
+        */
+        let codec_addr = 0u32;
+        let node_id = 0u32;
+        let verb = 0xF00u32;
+        let payload = 0u32;
+
+        let hda_verb: u32 = (codec_addr << 28) | (node_id << 20) | (verb << 8) | payload;
+
+    let wp = {
+
+        let mut corb = CORB.get().unwrap().lock();
+        corb.push(hda_verb);
+            corb.wp
+        };
+
+        without_interrupts(|| {
+            let hda = HDA.get().unwrap().lock();
+            hda.write_reg(CORBWP, wp as u16)
+        });
+    }
+
+    /* {
         let args = [c"test".as_ptr()];
         spawn_proc(c"shell", args.as_ptr(), 1);
-    }
+    } */
+
+    serial_println!("Done pushing verb");
 
     hlt_loop();
 }

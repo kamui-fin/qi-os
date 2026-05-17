@@ -13,6 +13,12 @@ use crate::driver::cmos::RTCTime;
 use crate::driver::mouse::GenericPs2Packet;
 use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
+use crate::pci::CORB;
+use crate::pci::HDA;
+use crate::pci::INTSTS;
+use crate::pci::RIRB;
+use crate::pci::RIRBSTS;
+use crate::pci::RIRBWP;
 use crate::print;
 use crate::println;
 use crate::random::mix_entropy;
@@ -56,6 +62,7 @@ pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
     Keyboard,
     PS2 = PIC_1_OFFSET + 12,
+    HdaAudio = PIC_1_OFFSET + 11,
 }
 
 impl InterruptIndex {
@@ -82,6 +89,7 @@ lazy_static! {
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault.set_handler_fn(gpf_handler);
         idt[InterruptIndex::PS2.as_usize()].set_handler_fn(mouse_interrupt_handler);
+        idt[InterruptIndex::HdaAudio.as_usize()].set_handler_fn(hda_interrupt_handler);
 
         unsafe {
             let handler_addr = VirtAddr::new(syscall_entry as usize as u64);
@@ -161,6 +169,39 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 
     switch_if_needed();
+}
+
+// TODO: migrate to MSI later
+extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let hda = HDA.get().unwrap().lock();
+    let corb = CORB.get().unwrap().lock();
+
+    let status = hda.read_reg::<u32>(INTSTS);
+
+    let is_not_spurious = (status & (1 << 31)) != 0;
+    let is_controller = (status & (1 << 30)) != 0;
+
+    let status = hda.read_reg::<u8>(RIRBSTS);
+    let has_codec_resp = status & 1 != 0;
+
+    if is_not_spurious && is_controller && has_codec_resp {
+        let wp = (hda.read_reg::<u16>(RIRBWP) & 0xFF) as u8;
+        let mut rirb = RIRB.get().unwrap().lock();
+        while rirb.rp != wp {
+            let item = rirb.pop();
+            let cmd = corb.awaiting.pop().unwrap();
+            corb.ready
+                .force_push(crate::pci::CmdResponsePair { cmd, resp: item });
+        }
+    }
+
+    // clear interrupt
+    hda.write_reg(RIRBSTS, 1u8);
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::HdaAudio.as_u8());
+    }
 }
 
 enum MouseDataState {
