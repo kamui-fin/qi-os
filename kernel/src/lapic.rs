@@ -245,6 +245,7 @@ const INT_LOGICAL: usize = 0x00000800; // Destination is CPU id (vs APIC ID)
 struct IOApic {
     base: u64,
     apic_id: u8,
+    redirects: Vec<InterruptSourceOverrideEntry>,
 }
 
 impl IOApic {
@@ -252,6 +253,7 @@ impl IOApic {
         Self {
             base: io_apic_entry.io_apic_address as u64,
             apic_id: io_apic_entry.io_apic_id,
+            redirects: Vec::with_capacity(15),
         }
     }
 
@@ -302,6 +304,12 @@ impl IOApic {
         self.write((REG_TABLE as u32) + 2 * irq, T_IRQ0 as u32 + irq);
         self.write((REG_TABLE as u32) + 2 * irq + 1, cpu_id << 24);
     }
+
+    pub fn add_redirection(&mut self, iso: InterruptSourceOverrideEntry) {
+        self.redirects.push(iso);
+    }
+
+    pub fn enable_interrupt(&self, irq: u32, vector: u32, apic_id: u8, flags: u16) {}
 }
 
 pub fn find_cpus() -> (Lapic, Vec<MadtEntryData>) {

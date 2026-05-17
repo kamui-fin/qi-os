@@ -29,26 +29,24 @@ use crate::task::thread::BlockReason;
 use crate::task::thread::ThreadControlBlock;
 use crate::task::thread::ThreadState;
 use crate::task::thread::CURR_THREAD_PTR;
-use crate::task::thread::SCHEDULER;
 use conquer_once::spin::OnceCell;
 use lazy_static::lazy_static;
-use pic8259::ChainedPics;
 use spin;
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::VirtAddr;
 
+pub static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
+pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
+pub const TIME_SLICE: usize = 100 * 1_000_000;
+pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
+
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
-
-pub static BOOT_RTC: OnceCell<RTCTime> = OnceCell::uninit();
-pub static ELAPSED: AtomicU64 = AtomicU64::new(0);
-pub const TIME_SLICE: usize = 100 * 1_000_000;
-pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -77,12 +75,12 @@ lazy_static! {
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(crate::mem::gdt::DOUBLE_FAULT_IST_INDEX);
         }
-        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
-        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault.set_handler_fn(gpf_handler);
+
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::PS2.as_usize()].set_handler_fn(mouse_interrupt_handler);
-        idt[0x40].set_handler_fn(test_apic_handler);
 
         unsafe {
             let handler_addr = VirtAddr::new(syscall_entry as usize as u64);
@@ -92,15 +90,6 @@ lazy_static! {
         }
         idt
     };
-}
-
-extern "x86-interrupt" fn test_apic_handler(_stack_frame: InterruptStackFrame) {
-    serial_println!("Hi from apic (CPU0)");
-
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::PS2.as_u8());
-    }
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
