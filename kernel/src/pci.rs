@@ -8,6 +8,7 @@ use alloc::{boxed::Box, vec};
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use embedded_graphics::prelude::OffsetOutline;
+use futures_util::task::AtomicWaker;
 use futures_util::Stream;
 use spin::Mutex;
 use volatile::Volatile;
@@ -173,8 +174,12 @@ pub const RIRBSTS: u8 = 0x5D; // 8bit
 pub const MMIO_VIRT_BASE: u64 = 0xFFFF_D000_0000_0000;
 
 pub static HDA: OnceCell<Mutex<HdaPci>> = OnceCell::uninit();
+
 pub static CORB: OnceCell<Mutex<CorbBuffer>> = OnceCell::uninit();
 pub static RIRB: OnceCell<Mutex<RirbBuffer>> = OnceCell::uninit();
+
+pub static RESP_WAKER: AtomicWaker = AtomicWaker::new();
+pub static HDA_CMD_RESP_QUEUE: OnceCell<CmdResponsePairBuffer> = OnceCell::uninit();
 
 // TODO: make sure allocator respects Layout::align()
 #[repr(align(128))]
@@ -187,15 +192,9 @@ pub struct CorbBuffer {
     pub wp: usize,
 }
 
-// just for kernel to create async wrappers over this
-pub struct CmdResponsePair {
-    pub cmd: u32,
-    pub resp: RirbResponseEntry,
-}
-
 pub struct CmdResponsePairBuffer {
-    pub awaiting: ArrayQueue<u32>,
-    pub ready: ArrayQueue<CmdResponsePair>,
+    pub awaiting_req: ArrayQueue<u32>,
+    pub ready_resp: ArrayQueue<RirbResponseEntry>,
 }
 
 pub struct CorbRespStream {
@@ -209,20 +208,20 @@ impl CorbRespStream {
 }
 
 impl Stream for CorbRespStream {
-    type Item = u8;
+    type Item = RirbResponseEntry;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<u8>> {
-        let queue = CORB.try_get().expect("not initialized");
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let queue = HDA_CMD_RESP_QUEUE.try_get().expect("not initialized");
         // fast path
-        if let Some(scancode) = queue.pop() {
-            return Poll::Ready(Some(scancode));
+        if let Some(resp) = queue.ready_resp.pop() {
+            return Poll::Ready(Some(resp));
         }
 
-        WAKER.register(&cx.waker());
-        match queue.pop() {
-            Some(scancode) => {
-                WAKER.take();
-                Poll::Ready(Some(scancode))
+        RESP_WAKER.register(&cx.waker());
+        match queue.ready_resp.pop() {
+            Some(resp) => {
+                RESP_WAKER.take();
+                Poll::Ready(Some(resp))
             }
             None => Poll::Pending,
         }
@@ -236,8 +235,6 @@ impl CorbBuffer {
                 buffer: [0u32; 256],
             }),
             wp: 0,
-            awaiting: ArrayQueue::new(256),
-            ready: ArrayQueue::new(256),
         }
     }
 
@@ -245,7 +242,6 @@ impl CorbBuffer {
         self.wp = (self.wp + 1) % 256;
         unsafe {
             core::ptr::write_volatile(&mut self.buffer.buffer[self.wp], val);
-            self.awaiting.force_push(val);
             core::arch::x86_64::_mm_clflush(&self.buffer.buffer[self.wp] as *const _ as *const u8);
         }
     }
@@ -254,10 +250,10 @@ impl CorbBuffer {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RirbResponseEntry {
-    raw_response: u32,
+    pub raw_response: u32,
     // Bits 35–32 (Codec ID / CID): The hardware index of the codec that sent the message (e.g., 0000 means Codec 0).
     // Bit 36 (Solicited vs. Unsolicited / U)
-    metadata: u32,
+    pub metadata: u32,
 }
 
 #[repr(align(128))]
@@ -506,4 +502,8 @@ pub fn init_pci() {
     hda.setup();
 
     HDA.init_once(|| Mutex::new(hda));
+    HDA_CMD_RESP_QUEUE.init_once(|| CmdResponsePairBuffer {
+        awaiting_req: ArrayQueue::new(256),
+        ready_resp: ArrayQueue::new(256),
+    });
 }

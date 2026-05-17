@@ -32,7 +32,10 @@ use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::mem::allocator::init_heap;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
-use kernel::pci::{init_pci, pci_enumerate, CORB, CORBWP, HDA};
+use kernel::pci::{
+    init_pci, pci_enumerate, CorbRespStream, RirbResponseEntry, CORB, CORBWP, HDA,
+    HDA_CMD_RESP_QUEUE,
+};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::lock::NEEDS_RESCHEDULE;
@@ -154,13 +157,13 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     init_pci();
     serial_println!("Enumerated PCI and initialized Intel HDA!");
 
-    /* {
+    {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn(2, cleaner_task as *const ());
-        scheduler.spawn(3, compositor_task as *const ());
+        // scheduler.spawn(2, cleaner_task as *const ());
+        // scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
-        scheduler.spawn(5, render_tty_task as *const ());
-    } */
+        // scheduler.spawn(5, render_tty_task as *const ());
+    }
 
     /* println!("[ OK ] Started threads + async executor");
     println!("Ready!");
@@ -173,24 +176,6 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
         31........28 27.....20 19....8 7.....0
         Codec Addr     Node ID   Verb     Payload
         */
-        let codec_addr = 0u32;
-        let node_id = 0u32;
-        let verb = 0xF00u32;
-        let payload = 0u32;
-
-        let hda_verb: u32 = (codec_addr << 28) | (node_id << 20) | (verb << 8) | payload;
-
-    let wp = {
-
-        let mut corb = CORB.get().unwrap().lock();
-        corb.push(hda_verb);
-            corb.wp
-        };
-
-        without_interrupts(|| {
-            let hda = HDA.get().unwrap().lock();
-            hda.write_reg(CORBWP, wp as u16)
-        });
     }
 
     /* {
@@ -203,11 +188,135 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     hlt_loop();
 }
 
+async fn hda_qemu_setup() {
+    // configure node 3 - the speakers
+    hda_request_verb_no_res(0u32, 3u32, 0x707u32, 0x40u32).await;
+    hda_request_verb_no_res(0u32, 3u32, 0x300u32, 0xB000u32 | 1).await;
+}
+
+// BIG TODO: This is a WIP. Real HDA drivers should parse a node graph and dynamically select a stream path, checking for capabilities
+// main focus atm is js QEMU, so we'll be configuring hardcoded path and stream config instead lmao
+async fn hda_discovery() {
+    let codec_addr = 0u32;
+    let node_id = 0u32;
+
+    // GET_PARAMETER(VENDOR_ID)
+    let resp = hda_request_verb(codec_addr, node_id, 0xF00u32, 0u32).await;
+    let vendor_id = (resp.raw_response >> 16) as u16;
+    let codec_device_id = resp.raw_response as u16;
+
+    serial_println!("vendor id: {:#X}", vendor_id);
+    serial_println!("device id: {:#X}", codec_device_id);
+
+    // Get Subordinate Node Count
+    let resp = hda_request_verb(codec_addr, node_id, 0xF00u32, 0x04u32).await;
+    let start_node = (resp.raw_response >> 16) as u8;
+    let total_nodes = resp.raw_response as u8;
+
+    serial_println!(
+        "func groups -> start node: {:#?}, total nodes: {:#?}",
+        start_node,
+        total_nodes
+    );
+
+    for fg_node in start_node..(start_node + total_nodes) {
+        // node function groups
+        let resp = hda_request_verb(codec_addr, fg_node as u32, 0xF00u32, 0x05u32).await;
+        let function_group = resp.raw_response as u8;
+
+        serial_println!("func group node {:#?}: type {:#X}", fg_node, function_group);
+
+        // get widgets
+        let resp = hda_request_verb(codec_addr, fg_node as u32, 0xF00u32, 0x04u32).await;
+        let start_node = (resp.raw_response >> 16) as u8;
+        let total_nodes = resp.raw_response as u8;
+
+        serial_println!(
+            "  widgets -> start node: {:#?}, total widgets: {:#?}",
+            start_node,
+            total_nodes
+        );
+
+        // for each widget
+        for wg_node in start_node..(start_node + total_nodes) {
+            // identify widget type
+            let resp = hda_request_verb(codec_addr, wg_node as u32, 0xF00u32, 0x09u32).await;
+            let widget_type = ((resp.raw_response >> 20) & 0xF) as u8;
+            serial_println!("    widget Node {:#?}: type {:#X}", wg_node, widget_type);
+            /*
+                0x0 = output converter (DAC)
+                0x1 = input converter (ADC)
+                0x2 = mixer
+                0x3 = selector
+                0x4 = pin complex
+            */
+            if widget_type == 0x4 {
+                // Pin config default
+            }
+
+            // Connection list length
+            let resp = hda_request_verb(codec_addr, wg_node as u32, 0xF00u32, 0x0Eu32).await;
+            let list_length = (resp.raw_response & 0b0011_1111) as u8;
+            let _long_form = ((resp.raw_response >> 7) & 1) as u8;
+
+            if list_length > 0 {
+                // connection list entry at index 0
+                let resp = hda_request_verb(codec_addr, wg_node as u32, 0xF02u32, 0x00u32).await;
+                // nid
+                let list_entry = resp.raw_response as u8;
+                serial_println!("        connection entry -> {list_entry}");
+                // hardcode a path for now
+            }
+        }
+    }
+}
+
+async fn hda_request_verb_no_res(codec_addr: u32, node_id: u32, verb: u32, payload: u32) {
+    let hda_verb: u32 = (codec_addr << 28) | (node_id << 20) | (verb << 8) | payload;
+    let wp = {
+        let mut corb = CORB.get().unwrap().lock();
+        corb.push(hda_verb);
+        corb.wp
+    };
+    without_interrupts(|| {
+        let hda = HDA.get().unwrap().lock();
+        hda.write_reg(CORBWP, wp as u16)
+    });
+}
+
+async fn hda_request_verb(
+    codec_addr: u32,
+    node_id: u32,
+    verb: u32,
+    payload: u32,
+) -> RirbResponseEntry {
+    let hda_verb: u32 = (codec_addr << 28) | (node_id << 20) | (verb << 8) | payload;
+
+    let wp = {
+        let mut corb = CORB.get().unwrap().lock();
+        corb.push(hda_verb);
+
+        let kern_hda_resp_buffer = HDA_CMD_RESP_QUEUE.get().unwrap();
+        kern_hda_resp_buffer.awaiting_req.force_push(hda_verb);
+
+        corb.wp
+    };
+
+    without_interrupts(|| {
+        let hda = HDA.get().unwrap().lock();
+        hda.write_reg(CORBWP, wp as u16)
+    });
+
+    let mut stream = CorbRespStream::new();
+    stream.next().await.unwrap()
+}
+
 fn async_executor_task() {
     let mut executor = Executor::new();
-    executor.spawn(Task::new(print_mouse_movement()));
-    executor.spawn(Task::new(handle_keyboard()));
-    executor.spawn(Task::new(listen_console_buffer()));
+    executor.spawn(Task::new(hda_discovery()));
+    // executor.spawn(Task::new(print_mouse_movement()));
+    // executor.spawn(Task::new(handle_keyboard()));
+    // executor.spawn(Task::new(listen_console_buffer()));
     executor.run();
 }
 

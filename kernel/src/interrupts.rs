@@ -15,7 +15,9 @@ use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
 use crate::pci::CORB;
 use crate::pci::HDA;
+use crate::pci::HDA_CMD_RESP_QUEUE;
 use crate::pci::INTSTS;
+use crate::pci::RESP_WAKER;
 use crate::pci::RIRB;
 use crate::pci::RIRBSTS;
 use crate::pci::RIRBWP;
@@ -174,7 +176,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 // TODO: migrate to MSI later
 extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let hda = HDA.get().unwrap().lock();
-    let corb = CORB.get().unwrap().lock();
+    let resp_queue = HDA_CMD_RESP_QUEUE.get().unwrap();
 
     let status = hda.read_reg::<u32>(INTSTS);
 
@@ -189,9 +191,10 @@ extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFram
         let mut rirb = RIRB.get().unwrap().lock();
         while rirb.rp != wp {
             let item = rirb.pop();
-            let cmd = corb.awaiting.pop().unwrap();
-            corb.ready
-                .force_push(crate::pci::CmdResponsePair { cmd, resp: item });
+            let cmd = resp_queue.awaiting_req.pop().unwrap();
+            resp_queue.ready_resp.force_push(item);
+
+            RESP_WAKER.wake();
         }
     }
 
