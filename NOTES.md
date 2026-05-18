@@ -2,6 +2,8 @@
 
 - Complete shell functionality
 - proper error handling
+- HDA sound
+- Floating point support
 - Parallelism:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
@@ -18,7 +20,6 @@
 ---
 
 Wayyy into future:
-- sound
 - advanced compositor:
     - wallpaper
     - floating windows

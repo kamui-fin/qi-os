@@ -186,15 +186,19 @@ extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFram
     let status = hda.read_reg::<u8>(RIRBSTS);
     let has_codec_resp = status & 1 != 0;
 
+    // serial_println!("Interrupt! Not spurious? {is_not_spurious} Has codec resp? {has_codec_resp}");
+
     if is_not_spurious && is_controller && has_codec_resp {
         let wp = (hda.read_reg::<u16>(RIRBWP) & 0xFF) as u8;
         let mut rirb = RIRB.get().unwrap().lock();
         while rirb.rp != wp {
             let item = rirb.pop();
-            let cmd = resp_queue.awaiting_req.pop().unwrap();
-            resp_queue.ready_resp.force_push(item);
-
-            RESP_WAKER.wake();
+            if let Some(cmd) = resp_queue.awaiting_req.pop() {
+                resp_queue.ready_resp.force_push(item);
+                RESP_WAKER.wake();
+            } else {
+                // serial_println!("received unmatched response {:#X}", item.raw_response);
+            }
         }
     }
 

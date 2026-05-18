@@ -171,32 +171,29 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     x86_64::instructions::interrupts::enable();
 
-    {
-        /*
-        31........28 27.....20 19....8 7.....0
-        Codec Addr     Node ID   Verb     Payload
-        */
-    }
-
     /* {
         let args = [c"test".as_ptr()];
         spawn_proc(c"shell", args.as_ptr(), 1);
     } */
 
-    serial_println!("Done pushing verb");
-
     hlt_loop();
 }
 
 async fn hda_qemu_setup() {
-    // configure node 3 - the speakers
-    hda_request_verb_no_res(0u32, 3u32, 0x707u32, 0x40u32).await; // turn on electricity
-    hda_request_verb_no_res(0u32, 3u32, 0x300u32, 0xB000u32 | 1).await; // unmute
+    // hda_discovery().await;
+    // speakers config
+    hda_request_verb_no_res(0u32, 3u32, 0x707u32, 0x40).await; // turn on electricity
+    hda_request_verb_no_res(0u32, 3u32, 0x300u32, 0xB000 | 0x40).await; // unmute amp
 
-    // configure node 2 - dac
-    hda_request_verb_no_res(0u32, 2u32, 0x300u32, 0xB000u32 | 1).await; // unmute
+    // dac config
+    hda_request_verb_no_res(0u32, 2u32, 0x300u32, 0xB000 | 0x40).await; // unmute amp
     hda_request_verb_no_res(0u32, 2u32, 0x706u32, 0x10).await; // stream 1 channel 0
-    hda_request_verb_no_res(0u32, 2u32, 0x705u32, 0x0011).await; // stream format
+    hda_request_verb_no_res(0u32, 2u32, 0x2u32, 0x0011).await; // 48kHz, 16-bit, 2-channels
+
+    without_interrupts(|| {
+        let hda = HDA.get().unwrap().lock();
+        hda.start_dma();
+    });
 }
 
 // BIG TODO: This is a WIP. Real HDA drivers should parse a node graph and dynamically select a stream path, checking for capabilities
@@ -318,7 +315,7 @@ async fn hda_request_verb(
 
 fn async_executor_task() {
     let mut executor = Executor::new();
-    executor.spawn(Task::new(hda_discovery()));
+    executor.spawn(Task::new(hda_qemu_setup()));
     // executor.spawn(Task::new(print_mouse_movement()));
     // executor.spawn(Task::new(handle_keyboard()));
     // executor.spawn(Task::new(listen_console_buffer()));

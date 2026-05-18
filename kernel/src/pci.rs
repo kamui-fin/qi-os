@@ -1,32 +1,24 @@
 use core::arch::x86_64::_mm_clflush;
-use core::panicking::panic_const::panic_const_add_overflow;
 use core::pin::Pin;
-use core::ptr::write_volatile;
 use core::task::{Context, Poll};
 
+use crate::{serial_println, ALLOC, KERNEL_CONFIG, PHYS_MEM_OFFSET};
 use alloc::vec::Vec;
 use alloc::{boxed::Box, vec};
 use bitfield_struct::bitfield;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
-use embedded_graphics::prelude::OffsetOutline;
 use futures_util::task::AtomicWaker;
 use futures_util::Stream;
-use lazy_static::lazy_static;
 use spin::Mutex;
-use volatile::Volatile;
 use x86_64::structures::paging::{FrameAllocator, Translate};
 use x86_64::{
-    align_up,
     instructions::port::Port,
     structures::paging::{
-        Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size2MiB, Size4KiB,
+        Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
     },
     PhysAddr, VirtAddr,
 };
-
-use crate::mem::allocator::HEAP_START;
-use crate::{serial_println, ALLOC, KERNEL_CONFIG, PHYS_MEM_OFFSET};
 
 fn pci_read_32(bus: u16, slot: u16, func: u16, offset: u16) -> u32 {
     let address = (bus as u64) << 16
@@ -153,26 +145,27 @@ fn align_to(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
-pub const GCTL: u8 = 0x08;
-pub const STATESTS: u8 = 0x0E;
+pub const GCAP: u16 = 0x00;
+pub const GCTL: u16 = 0x08;
+pub const STATESTS: u16 = 0x0E;
 
-pub const INTCTL: u8 = 0x20; // 32bit
-pub const INTSTS: u8 = 0x24; // 32bit
+pub const INTCTL: u16 = 0x20; // 32bit
+pub const INTSTS: u16 = 0x24; // 32bit
 
-pub const CORBLBASE: u8 = 0x40;
-pub const CORBUBASE: u8 = 0x44;
-pub const CORBWP: u8 = 0x48;
-pub const CORBRP: u8 = 0x4A;
-pub const CORBCTL: u8 = 0x4C;
-pub const CORBSIZE: u8 = 0x4E;
+pub const CORBLBASE: u16 = 0x40;
+pub const CORBUBASE: u16 = 0x44;
+pub const CORBWP: u16 = 0x48;
+pub const CORBRP: u16 = 0x4A;
+pub const CORBCTL: u16 = 0x4C;
+pub const CORBSIZE: u16 = 0x4E;
 
-pub const RIRBLBASE: u8 = 0x50;
-pub const RIRBUBASE: u8 = 0x54;
-pub const RIRBWP: u8 = 0x58;
-pub const RINTCNT: u8 = 0x5A;
-pub const RIRBCTL: u8 = 0x5C;
-pub const RIRBSIZE: u8 = 0x5E;
-pub const RIRBSTS: u8 = 0x5D; // 8bit
+pub const RIRBLBASE: u16 = 0x50;
+pub const RIRBUBASE: u16 = 0x54;
+pub const RIRBWP: u16 = 0x58;
+pub const RINTCNT: u16 = 0x5A;
+pub const RIRBCTL: u16 = 0x5C;
+pub const RIRBSIZE: u16 = 0x5E;
+pub const RIRBSTS: u16 = 0x5D; // 8bit
 
 pub const MMIO_VIRT_BASE: u64 = 0xFFFF_D000_0000_0000;
 
@@ -326,12 +319,12 @@ impl HdaPci {
         }
     }
 
-    pub fn read_reg<T>(&self, reg: u8) -> T {
+    pub fn read_reg<T>(&self, reg: u16) -> T {
         let ptr = (self.base + (reg as u64) + MMIO_VIRT_BASE) as *mut T;
         unsafe { ptr.read_volatile() }
     }
 
-    pub fn write_reg<T>(&self, reg: u8, val: T) {
+    pub fn write_reg<T>(&self, reg: u16, val: T) {
         let ptr = (self.base + (reg as u64) + MMIO_VIRT_BASE) as *mut T;
         unsafe { ptr.write_volatile(val) }
     }
@@ -362,6 +355,11 @@ impl HdaPci {
         for _ in 0..50000 {
             core::hint::spin_loop();
         }
+
+        let gcap = self.read_reg::<u32>(GCAP);
+        let iss = ((gcap >> 8) & 0xF) as u8;
+        let oss = ((gcap >> 12) & 0xF) as u8;
+
         let codecs = self.read_reg::<u16>(STATESTS);
         // corb setup
         // set CORBSIZE = 256 entries = 1kb
@@ -394,10 +392,6 @@ impl HdaPci {
 
         let rirb_addr =
             self.translate(&*rirb.buffer as *const AlignedRingBuffer<RirbResponseEntry>);
-        serial_println!("RIRB Phys Addr: {:#X}", rirb_addr);
-        if rirb_addr % 128 != 0 {
-            panic!("MY ALLOCATOR BETRAYED ME! Memory is not 128-byte aligned!");
-        }
         let low = (rirb_addr & 0xFFFFFFFF) as u32;
         let high = ((rirb_addr >> 32) & 0xFFFFFFFF) as u32;
         self.write_reg(RIRBUBASE, high);
@@ -414,30 +408,79 @@ impl HdaPci {
 
         CORB.init_once(|| Mutex::new(corb));
         RIRB.init_once(|| Mutex::new(rirb));
+
+        // Output stream 0 base: MMIO BAR0 + 0x80 + (Number of input streams * 0x20)
+        let stream_base = 0x80 + (iss * 0x20u8) as u16;
+
+        // stop stream descriptor
+        let mut ctl_val = self.read_reg::<u32>(stream_base);
+        ctl_val &= !(1 << 1); // disable DMA
+        self.write_reg(stream_base, ctl_val);
+        /*
+         * TODO:
+        (2) Reset Stream Descriptor (set bit 0 in Control register, wait until it is set, then clear it and wait for it to be cleared)
+        */
+        let ctl_val = self.read_reg::<u32>(stream_base);
+        self.write_reg(stream_base, ctl_val | 1);
+        while (self.read_reg::<u32>(stream_base) & 1) == 0 {
+            core::hint::spin_loop();
+        }
+        self.write_reg(stream_base, ctl_val & !1);
+        while (self.read_reg::<u32>(stream_base) & 1) != 0 {
+            core::hint::spin_loop();
+        }
+
+        // BDPL & BDPU - 0x14 & 0x18 (4 bytes each)
+        let bdpl = self.create_bdpl();
+        fill_buffer_square_wave();
+        let bdpl = Box::leak(bdpl);
+        let bdpl_addr = self.translate(bdpl);
+        let low = (bdpl_addr & 0xFFFFFFFF) as u32;
+        let high = ((bdpl_addr >> 32) & 0xFFFFFFFF) as u32;
+        self.write_reg(stream_base + 0x1C, high);
+        self.write_reg(stream_base + 0x18, low);
+        // CBL - 0x08 (4 bytes)
+        self.write_reg(stream_base + 0x08, 4096 * 4 as u32);
+        // LVI - 0x0C (2 bytes)
+        self.write_reg(stream_base + 0x0C, 3 as u16);
+        // FMT - 0x12 (2 byte)
+        self.write_reg(stream_base + 0x12, 0x0011 as u16);
+        // STS - 0x03 (1 byte)
+        self.write_reg(stream_base + 0x03, 0xFF as u8);
+        // LPIB - 0x04 (4 bytes)
+    }
+
+    pub fn start_dma(&self) {
+        let gcap = self.read_reg::<u32>(GCAP);
+        let iss = ((gcap >> 8) & 0xF) as u8;
+        // Output stream 0 base: MMIO BAR0 + 0x80 + (Number of input streams * 0x20)
+        let stream_base = 0x80 + (iss * 0x20u8) as u16;
+        // CTL - 0x00 (3 bytes)
+        let stream_no = 1;
+        let stream_mask = ((1u32 << 4) - 1) << 20;
+        let mut ctl_val = self.read_reg::<u32>(stream_base);
+        ctl_val &= !1; // clear reset bit
+        ctl_val |= 1 << 1; // RUN
+        ctl_val |= 1 << 2; // Interrupt on completion
+        ctl_val |= 1 << 3; // Interrupt if underrun
+        ctl_val |= 1 << 4; // Interrupt if descriptor error
+        let ctl_val = (ctl_val & !stream_mask) | ((stream_no << 20) & stream_mask);
+        self.write_reg(stream_base, ctl_val);
+    }
+
+    fn create_bdpl(&self) -> Box<BufferDescriptorList> {
+        let mut frame_allocator = ALLOC.get().unwrap().lock();
+        let kern_config = KERNEL_CONFIG.get().unwrap();
+        let page_table =
+            unsafe { &mut *((kern_config.page_table_address + PHYS_MEM_OFFSET) as *mut PageTable) };
+        let mut mapper =
+            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(PHYS_MEM_OFFSET)) };
+        Box::new(BufferDescriptorList::new(
+            &mut mapper,
+            &mut *frame_allocator,
+        ))
     }
 }
-
-/*
-Read HDA BAR
-    ↓
-Map HDA MMIO regs
-    ↓
-Enable bus mastering
-    ↓
-Reset controller
-    ↓
-Enumerate codecs
-    ↓
-Send verbs
-    ↓
-Build CORB/RIRB
-    ↓
-Build stream descriptor
-    ↓
-DMA audio buffers
-    ↓
-Play sound
-*/
 
 pub fn init_pci() {
     let devices = pci_enumerate();
@@ -493,7 +536,6 @@ pub fn init_pci() {
     // Specifies which interrupt pin the device uses. Where a value of 0x1 is INTA#, 0x2 is INTB#, 0x3 is INTC#,
     // 0x4 is INTD#, and 0x0 means the device does not use an interrupt pin.
     let int_pin = bytes[1];
-    serial_println!("LINE: {:b} ---- PIN: {:b}", int_line, int_pin);
 
     // On QEMU its usually always 11 so i'm gonna hardcode in IDT for now
     let pic_irq = int_line + 32;
@@ -509,26 +551,6 @@ pub fn init_pci() {
         awaiting_req: ArrayQueue::new(256),
         ready_resp: ArrayQueue::new(256),
     });
-
-    /*
-    (1) Stop Stream Descriptor (clear bit 1 in Control register)
-
-    (2) Reset Stream Descriptor (set bit 0 in Control register, wait until it is set, then clear it and wait for it to be cleared)
-
-    (3) Write Buffer Descriptor List physical address
-
-    (4) Add up length of all entries in Buffer Descriptor List and write it to register
-
-    (5) Set number of Buffer Descriptor List entries
-
-    (6) Set Stream Format register by same format you sended to Audio Output node
-
-    (7) Set number of stream you want to use for streaming data (in byte 2 of Control register)
-
-    (8) Start transfer (set bit 1 in Control register)
-    */
-
-    // Output stream 0 base: MMIO BAR0 + 0x80 + (Number of input streams * 0x20)
 }
 
 // ***********
@@ -538,9 +560,9 @@ pub fn init_pci() {
 #[bitfield(u32)]
 pub struct PcmSample {
     #[bits(16)]
-    pub left: u64,
+    pub left: i16,
     #[bits(16)]
-    pub right: u32,
+    pub right: i16,
 }
 
 #[bitfield(u128)]
@@ -553,7 +575,7 @@ pub struct BDLEntry {
     flags: u32,
 }
 
-pub const PCA_BUFFER_VIRT_START: u64 = MMIO_VIRT_BASE + 1024 * 16 + 1024;
+pub const PCA_BUFFER_VIRT_START: u64 = MMIO_VIRT_BASE + 1024 * 16;
 
 // The BDL should not be modified unless the RUN bit is 0
 #[repr(align(128))]
@@ -568,7 +590,7 @@ impl BufferDescriptorList {
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Self {
         let mut get_page = |idx: u64| -> BDLEntry {
-            let page = Page::containing_address(VirtAddr::new(PCA_BUFFER_VIRT_START) + idx);
+            let page = Page::containing_address(VirtAddr::new(PCA_BUFFER_VIRT_START)) + idx;
             let frame = frame_allocator.allocate_frame().unwrap();
             let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
             unsafe {
@@ -579,7 +601,7 @@ impl BufferDescriptorList {
             };
 
             BDLEntry::new()
-                .with_address(page.start_address().as_u64())
+                .with_address(frame.start_address().as_u64())
                 .with_length(4096)
                 .with_flags(1)
         };
@@ -589,4 +611,33 @@ impl BufferDescriptorList {
     }
 }
 
-fn fill_buffer_sine_wave() {}
+fn fill_buffer_square_wave() {
+    let sample_rate: usize = 48000;
+    let target_freq: usize = 440; // 440 Hz (Note A4)
+
+    // A 16-bit signed integer maxes out at 32767.
+    // We use 8000 so we don't blow out your eardrums (~25% volume).
+    let volume: i16 = 3000;
+    let period_samples = sample_rate / target_freq;
+    let half_period = period_samples / 2;
+    let total_samples = 4096;
+    let buffer_ptr = PCA_BUFFER_VIRT_START as *mut PcmSample;
+
+    for i in 0..total_samples {
+        // If we are in the first half of the cycle, push the speaker cone out.
+        // If we are in the second half, pull it in.
+        let sample_value = if (i % period_samples) < half_period {
+            volume
+        } else {
+            -volume
+        };
+
+        unsafe {
+            *buffer_ptr.add(i) = PcmSample::new()
+                .with_left(sample_value)
+                .with_right(sample_value);
+        }
+    }
+
+    serial_println!("Filled 16KB DMA buffer with 440Hz Square Wave!");
+}
