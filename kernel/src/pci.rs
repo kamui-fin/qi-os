@@ -1,18 +1,21 @@
 use core::arch::x86_64::_mm_clflush;
+use core::panicking::panic_const::panic_const_add_overflow;
 use core::pin::Pin;
 use core::ptr::write_volatile;
 use core::task::{Context, Poll};
 
 use alloc::vec::Vec;
 use alloc::{boxed::Box, vec};
+use bitfield_struct::bitfield;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use embedded_graphics::prelude::OffsetOutline;
 use futures_util::task::AtomicWaker;
 use futures_util::Stream;
+use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
-use x86_64::structures::paging::Translate;
+use x86_64::structures::paging::{FrameAllocator, Translate};
 use x86_64::{
     align_up,
     instructions::port::Port,
@@ -506,4 +509,84 @@ pub fn init_pci() {
         awaiting_req: ArrayQueue::new(256),
         ready_resp: ArrayQueue::new(256),
     });
+
+    /*
+    (1) Stop Stream Descriptor (clear bit 1 in Control register)
+
+    (2) Reset Stream Descriptor (set bit 0 in Control register, wait until it is set, then clear it and wait for it to be cleared)
+
+    (3) Write Buffer Descriptor List physical address
+
+    (4) Add up length of all entries in Buffer Descriptor List and write it to register
+
+    (5) Set number of Buffer Descriptor List entries
+
+    (6) Set Stream Format register by same format you sended to Audio Output node
+
+    (7) Set number of stream you want to use for streaming data (in byte 2 of Control register)
+
+    (8) Start transfer (set bit 1 in Control register)
+    */
+
+    // Output stream 0 base: MMIO BAR0 + 0x80 + (Number of input streams * 0x20)
 }
+
+// ***********
+// Buffer Descriptor List, DMA, Stream configs
+// ***********
+
+#[bitfield(u32)]
+pub struct PcmSample {
+    #[bits(16)]
+    pub left: u64,
+    #[bits(16)]
+    pub right: u32,
+}
+
+#[bitfield(u128)]
+pub struct BDLEntry {
+    #[bits(64)]
+    pub address: u64,
+    #[bits(32)]
+    pub length: u32,
+    #[bits(32)]
+    flags: u32,
+}
+
+pub const PCA_BUFFER_VIRT_START: u64 = MMIO_VIRT_BASE + 1024 * 16 + 1024;
+
+// The BDL should not be modified unless the RUN bit is 0
+#[repr(align(128))]
+struct BufferDescriptorList {
+    buffer: [BDLEntry; 4], // each entry is a page totaling 16kb cyclic buffer
+}
+
+impl BufferDescriptorList {
+    // This allocates 4 pages
+    pub fn new(
+        mapper: &mut impl Mapper<Size4KiB>,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    ) -> Self {
+        let mut get_page = |idx: u64| -> BDLEntry {
+            let page = Page::containing_address(VirtAddr::new(PCA_BUFFER_VIRT_START) + idx);
+            let frame = frame_allocator.allocate_frame().unwrap();
+            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+            unsafe {
+                mapper
+                    .map_to(page, frame, flags, frame_allocator)
+                    .unwrap()
+                    .flush()
+            };
+
+            BDLEntry::new()
+                .with_address(page.start_address().as_u64())
+                .with_length(4096)
+                .with_flags(1)
+        };
+        Self {
+            buffer: [get_page(0), get_page(1), get_page(2), get_page(3)],
+        }
+    }
+}
+
+fn fill_buffer_sine_wave() {}

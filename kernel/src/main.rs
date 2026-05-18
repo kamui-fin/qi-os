@@ -190,8 +190,13 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
 async fn hda_qemu_setup() {
     // configure node 3 - the speakers
-    hda_request_verb_no_res(0u32, 3u32, 0x707u32, 0x40u32).await;
-    hda_request_verb_no_res(0u32, 3u32, 0x300u32, 0xB000u32 | 1).await;
+    hda_request_verb_no_res(0u32, 3u32, 0x707u32, 0x40u32).await; // turn on electricity
+    hda_request_verb_no_res(0u32, 3u32, 0x300u32, 0xB000u32 | 1).await; // unmute
+
+    // configure node 2 - dac
+    hda_request_verb_no_res(0u32, 2u32, 0x300u32, 0xB000u32 | 1).await; // unmute
+    hda_request_verb_no_res(0u32, 2u32, 0x706u32, 0x10).await; // stream 1 channel 0
+    hda_request_verb_no_res(0u32, 2u32, 0x705u32, 0x0011).await; // stream format
 }
 
 // BIG TODO: This is a WIP. Real HDA drivers should parse a node graph and dynamically select a stream path, checking for capabilities
