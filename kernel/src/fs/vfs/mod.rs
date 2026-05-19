@@ -78,7 +78,7 @@ pub struct INode {
     pub meta: Mutex<FsMetadata>,
 
     pub ops: Arc<dyn INodeOps>,
-}
+}                        
 
 pub struct FsMetadata {
     pub size: usize,

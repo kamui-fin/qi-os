@@ -41,6 +41,7 @@ pub enum BlockReason {
     WaitStdin(u8),
     TtyRenderWait,
     AsyncExecutorWait,
+    WaitMouse(u8),
 }
 
 #[repr(C)]

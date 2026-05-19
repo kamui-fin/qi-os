@@ -53,9 +53,21 @@ pub struct RawBootInfo {
     free_memory_start_phys: u64,
 }
 
+extern "C" {
+    static mut __bss_start: u8;
+    static mut __bss_end: u8;
+}
+
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start(screen: *const Screen) -> ! {
+    unsafe {
+        let bss_start = &raw mut __bss_start as *mut u8;
+        let bss_end = &raw mut __bss_end as *mut u8;
+        let bss_len = bss_end as usize - bss_start as usize;
+        core::ptr::write_bytes(bss_start, 0, bss_len);
+    }
+
     serial::init();
     serial_println!("STAGE 3 BOOTLOADER BEGIN!");
 

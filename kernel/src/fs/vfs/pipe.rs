@@ -124,7 +124,7 @@ impl FileOps for PipeOps {
 
                     break;
                 }
-            }
+            } 
         }
 
         bytes_write

@@ -7,4 +7,9 @@ a.out
 *.tar*
 fat32_gen.sh
 
+<<<<<<< HEAD
 *.wav
+=======
+*.bak
+qemu_debug.log
+>>>>>>> 76d84f0 (feat: userspace access to mouse)

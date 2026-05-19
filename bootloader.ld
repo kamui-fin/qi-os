@@ -24,7 +24,9 @@ SECTIONS
 
     .bss :
     {
+        __bss_start = .;
         *(.bss .bss.*)
+        __bss_end = .;
     }
 
     /* Remove unnecessary ELF sections that might bloat the binary */

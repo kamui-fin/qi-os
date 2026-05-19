@@ -10,6 +10,7 @@ use crate::{
     },
     random::{get_rand_range, mix_entropy, mix_entropy_with},
     tty::TTY,
+    task::mouse::MouseDeviceHandle,
 };
 
 // major: device
@@ -183,12 +184,29 @@ pub fn mount_devfs() -> Mount {
         }),
     });
 
+    let mouse_inode = Arc::new(INode {
+        inum: 5,
+        fs: sb.clone(),
+        mode: NodeType::CharDevice,
+        data: INodeData::Device { major: 5, minor: 0 },
+        meta: Mutex::new(FsMetadata {
+            size: 0,
+            mtime: 0,
+            dirty: false,
+        }),
+        ops: Arc::new(Device {
+            ops: Arc::new(MouseDeviceHandle{}),
+        }),
+    });
+
     let mut devnode_map = BTreeMap::new();
     devnode_map.insert("zero".to_string(), zero_inode);
     devnode_map.insert("null".to_string(), null_inode);
     devnode_map.insert("urandom".to_string(), rand_inode);
 
     devnode_map.insert("tty1".to_string(), tty_one_inode);
+
+    devnode_map.insert("mouse".to_string(), mouse_inode);
 
     let root_inode = Arc::new(INode {
         inum: 0,
@@ -216,8 +234,6 @@ pub fn mount_devfs() -> Mount {
     };
 
     devfs
-
     // TODO:
-    //     - /dev/mouse
     //     - /dev/keyboard
 }

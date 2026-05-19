@@ -1,9 +1,14 @@
-use crate::{driver::mouse::GenericPs2Packet, println, serial_println, SCREEN};
+use crate::{PROC, SCREEN, driver::mouse::GenericPs2Packet, fs::fat::BlockDevice, println, serial_println, task::{
+        self, proc::thread_for_proc, thread::{BlockReason, SCHEDULER, ThreadState, block_task}
+    }
+
+};
 use conquer_once::spin::OnceCell;
 use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use alloc::{sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
 use embedded_graphics::{
     pixelcolor::{BinaryColor, Rgb565},
@@ -14,10 +19,36 @@ use embedded_graphics::{
 use futures_util::stream::Stream;
 use futures_util::stream::StreamExt;
 use futures_util::task::AtomicWaker;
+use crate::fs::vfs::FileOps;
+use crate::driver::mouse::Ps2Flags;
 
 static WAKER: AtomicWaker = AtomicWaker::new();
-
 static PACKET_QUEUE: OnceCell<ArrayQueue<GenericPs2Packet>> = OnceCell::uninit();
+
+pub struct MouseDeviceHandle {}
+impl FileOps for MouseDeviceHandle {
+    fn read(&self, _: &crate::fs::vfs::File, buffer: &mut [u8]) -> usize {
+        let queue = PACKET_QUEUE.try_get().expect("not initialized");
+        loop{
+            if let Some(packet) = queue.pop() {
+                if buffer.len() >= 3{
+                    buffer[0] = packet.status.bits();
+                    buffer[1] = packet.x_mov;
+                    buffer[2] = packet.y_mov;
+                    return 3;
+                }
+                else {
+                    return 0;
+                }
+            } else {
+                block_task(BlockReason::WaitMouse(0));
+            }
+        }
+    }
+    fn write(&self, _: &crate::fs::vfs::File, _buffer: &[u8]) -> usize {
+        return 0
+    }
+}
 
 /// Called by the mouse interrupt handler
 ///
@@ -26,6 +57,7 @@ pub(crate) fn add_packet(packet: GenericPs2Packet) {
     if let Ok(queue) = PACKET_QUEUE.try_get() {
         queue.force_push(packet);
         WAKER.wake();
+        wake_mouse_sleepers(0,Direction::Read);
     } else {
         serial_println!("WARNING: packet queue uninitialized");
     }
@@ -91,5 +123,30 @@ pub async fn print_mouse_movement() {
         .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
         .draw(&mut *screen)
         .unwrap(); */
+    }
+}
+enum Direction {
+    Read,
+    Write,
+}
+
+fn wake_mouse_sleepers(mouse_id: u8, dir:Direction) {
+    let procs = PROC.get().unwrap().lock();
+    let mut to_wake = Vec::new();
+    for proc in procs.iter() {
+        let thread = thread_for_proc(proc.lock().pid).unwrap();
+        let thread = thread.lock();
+        match (&dir, &thread.state) {
+            (Direction::Read, ThreadState::Blocked(BlockReason::WaitMouse(waiting_on))) => {
+                if *waiting_on == mouse_id {
+                    to_wake.push(thread.id);
+                }
+            }
+            _ => {}
+        };
+    }
+    let mut sched = SCHEDULER.lock();
+    for thread_id in to_wake {
+        sched.unblock_task(thread_id);
     }
 }

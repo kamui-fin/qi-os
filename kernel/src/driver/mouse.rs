@@ -14,7 +14,7 @@ bitflags! {
     */
      /// Represents a set of flags.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct Ps2Flags: u8 {
+   pub struct Ps2Flags: u8 {
         // Button Left (Normally Off = 0)
         const bl = 1 << 0;
         // Button Right (Normally Off = 0)
