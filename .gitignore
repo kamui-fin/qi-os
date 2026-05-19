@@ -6,3 +6,5 @@ a.out
 
 *.tar*
 fat32_gen.sh
+
+*.wav

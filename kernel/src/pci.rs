@@ -1,5 +1,6 @@
 use core::arch::x86_64::_mm_clflush;
 use core::pin::Pin;
+use core::sync::atomic::AtomicUsize;
 use core::task::{Context, Poll};
 
 use crate::{serial_println, ALLOC, KERNEL_CONFIG, PHYS_MEM_OFFSET};
@@ -10,6 +11,7 @@ use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use futures_util::task::AtomicWaker;
 use futures_util::Stream;
+use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::structures::paging::{FrameAllocator, Translate};
 use x86_64::{
@@ -404,7 +406,7 @@ impl HdaPci {
         self.write_reg(RIRBCTL, self.read_reg::<u8>(RIRBCTL) | 0b11);
 
         let status = self.read_reg::<u32>(INTCTL);
-        self.write_reg(INTCTL, status | (1 << 31) | (1 << 30) | 1);
+        self.write_reg(INTCTL, status | (1 << 31) | (1 << 30) | (1 << iss));
 
         CORB.init_once(|| Mutex::new(corb));
         RIRB.init_once(|| Mutex::new(rirb));
@@ -432,8 +434,9 @@ impl HdaPci {
 
         // BDPL & BDPU - 0x14 & 0x18 (4 bytes each)
         let bdpl = self.create_bdpl();
-        fill_buffer_square_wave();
         let bdpl = Box::leak(bdpl);
+        setup_bg_stream();
+
         let bdpl_addr = self.translate(bdpl);
         let low = (bdpl_addr & 0xFFFFFFFF) as u32;
         let high = ((bdpl_addr >> 32) & 0xFFFFFFFF) as u32;
@@ -592,7 +595,8 @@ impl BufferDescriptorList {
         let mut get_page = |idx: u64| -> BDLEntry {
             let page = Page::containing_address(VirtAddr::new(PCA_BUFFER_VIRT_START)) + idx;
             let frame = frame_allocator.allocate_frame().unwrap();
-            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+            let flags =
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
             unsafe {
                 mapper
                     .map_to(page, frame, flags, frame_allocator)
@@ -605,39 +609,99 @@ impl BufferDescriptorList {
                 .with_length(4096)
                 .with_flags(1)
         };
-        Self {
-            buffer: [get_page(0), get_page(1), get_page(2), get_page(3)],
-        }
+        let buffer = [get_page(0), get_page(1), get_page(2), get_page(3)];
+        serial_println!("{:#?}", buffer);
+        Self { buffer }
     }
 }
 
-fn fill_buffer_square_wave() {
-    let sample_rate: usize = 48000;
-    let target_freq: usize = 440; // 440 Hz (Note A4)
+#[derive(Debug, Clone)]
+#[repr(C, packed)]
+struct WavFormatHeader {
+    riff_magic: [u8; 4],
+    file_size: u32, // total file size - 8 bytes
+    wave_magic: [u8; 4],
 
-    // A 16-bit signed integer maxes out at 32767.
-    // We use 8000 so we don't blow out your eardrums (~25% volume).
-    let volume: i16 = 3000;
-    let period_samples = sample_rate / target_freq;
-    let half_period = period_samples / 2;
-    let total_samples = 4096;
-    let buffer_ptr = PCA_BUFFER_VIRT_START as *mut PcmSample;
+    // format chunk
+    fmt_magic: [u8; 4],
+    chunk_size: u32, // usually 16
 
-    for i in 0..total_samples {
-        // If we are in the first half of the cycle, push the speaker cone out.
-        // If we are in the second half, pull it in.
-        let sample_value = if (i % period_samples) < half_period {
-            volume
-        } else {
-            -volume
-        };
+    audio_format: u16,
+    num_channels: u16,
+    sample_rate: u32,
+    byte_rate: u32,
+    block_align: u16,
+    bits_per_sample: u16,
 
-        unsafe {
-            *buffer_ptr.add(i) = PcmSample::new()
-                .with_left(sample_value)
-                .with_right(sample_value);
+    data_magic: [u8; 4], // data chunk header
+    data_size: u32,
+}
+
+#[repr(align(2))]
+struct AlignedWavData {
+    data: [u8; include_bytes!("./driver/sample.wav").len()],
+}
+
+static RAW_WAV: AlignedWavData = AlignedWavData {
+    data: *include_bytes!("./driver/sample.wav"),
+};
+
+pub struct WavStream {
+    samples: &'static [i16],
+    cursor: AtomicUsize,
+}
+
+impl WavStream {
+    pub fn new() -> Self {
+        let bytes = &RAW_WAV.data;
+        let wav_format_size = core::mem::size_of::<WavFormatHeader>();
+        let audio_bytes = &bytes[wav_format_size..];
+        let (prefix, samples, suffix) = unsafe { audio_bytes.align_to::<i16>() };
+        assert!(prefix.is_empty());
+        assert!(suffix.is_empty());
+
+        Self {
+            samples,
+            cursor: AtomicUsize::new(0),
         }
     }
 
-    serial_println!("Filled 16KB DMA buffer with 440Hz Square Wave!");
+    /* fn get_header(&self) -> WavFormatHeader {
+        let header_bytes = &self.bytes[..self.header_size];
+        let header = unsafe { &*(header_bytes.as_ptr() as *const WavFormatHeader) };
+        header.clone()
+    } */
+
+    pub fn next_samples(&self, requested_frames: usize) -> &'static [i16] {
+        let elements_needed = requested_frames * 2;
+        let mut cursor = self.cursor.load(core::sync::atomic::Ordering::Relaxed);
+
+        if cursor + elements_needed > self.samples.len() {
+            cursor = 0;
+        }
+
+        let sliced_samples = &self.samples[cursor..(cursor + elements_needed)];
+        self.cursor.store(
+            cursor + elements_needed,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        sliced_samples
+    }
+}
+
+lazy_static! {
+    pub static ref WAV: WavStream = WavStream::new();
+}
+
+fn setup_bg_stream() {
+    let samples = WAV.next_samples(4096);
+    let buffer_ptr = PCA_BUFFER_VIRT_START as *mut PcmSample;
+    for (i, lr_samples) in samples.chunks_exact(2).enumerate() {
+        let left = lr_samples[0];
+        let right = lr_samples[1];
+
+        unsafe {
+            *buffer_ptr.add(i) = PcmSample::new().with_left(left).with_right(right);
+        }
+    }
 }

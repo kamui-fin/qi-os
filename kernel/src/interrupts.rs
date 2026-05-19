@@ -13,14 +13,18 @@ use crate::driver::cmos::RTCTime;
 use crate::driver::mouse::GenericPs2Packet;
 use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
+use crate::pci::PcmSample;
 use crate::pci::CORB;
+use crate::pci::GCAP;
 use crate::pci::HDA;
 use crate::pci::HDA_CMD_RESP_QUEUE;
 use crate::pci::INTSTS;
+use crate::pci::PCA_BUFFER_VIRT_START;
 use crate::pci::RESP_WAKER;
 use crate::pci::RIRB;
 use crate::pci::RIRBSTS;
 use crate::pci::RIRBWP;
+use crate::pci::WAV;
 use crate::print;
 use crate::println;
 use crate::random::mix_entropy;
@@ -179,15 +183,50 @@ extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFram
     let resp_queue = HDA_CMD_RESP_QUEUE.get().unwrap();
 
     let status = hda.read_reg::<u32>(INTSTS);
+    let sis = status & !(0b11 << 30);
+
+    {
+        let gcap = hda.read_reg::<u32>(GCAP);
+        let iss = ((gcap >> 8) & 0xF) as u8;
+        // Output stream 0 base: MMIO BAR0 + 0x80 + (Number of input streams * 0x20)
+        let stream_base = 0x80 + (iss * 0x20u8) as u16;
+        // STS - 0x03 (1 byte)
+        let sts = hda.read_reg::<u8>(stream_base + 0x03);
+        let bcis = sts & (1 << 2);
+
+        if bcis != 0 {
+            // LPIB - 0x04 (4 bytes)
+            let lpib = hda.read_reg::<u32>(stream_base + 0x04) as u64;
+            // serial_println!("SIS: {:b} STS: {:b}, LPIB: {}", sis, sts, lpib / 1024);
+
+            // given lpbib, figure out which bdlentry 1.2.3.4 it belongs to
+            // then we fill in the *next* bdlentry
+            let to_fill_bdl = ((lpib / 4096) + 3) % 4;
+            let samples = WAV.next_samples(1024);
+            let sample_bytes = unsafe {
+                core::slice::from_raw_parts(samples.as_ptr() as *const PcmSample, 1024)
+            };
+
+            let buffer_ptr = (PCA_BUFFER_VIRT_START + (4096 * to_fill_bdl)) as *mut PcmSample;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    sample_bytes.as_ptr(),
+                    buffer_ptr,
+                    sample_bytes.len(),
+                );
+            }
+
+            // clear interrupt
+            hda.write_reg(stream_base + 0x03, 1u8 << 2);
+        }
+    }
 
     let is_not_spurious = (status & (1 << 31)) != 0;
     let is_controller = (status & (1 << 30)) != 0;
 
+    // Handling RIRB responses
     let status = hda.read_reg::<u8>(RIRBSTS);
     let has_codec_resp = status & 1 != 0;
-
-    // serial_println!("Interrupt! Not spurious? {is_not_spurious} Has codec resp? {has_codec_resp}");
-
     if is_not_spurious && is_controller && has_codec_resp {
         let wp = (hda.read_reg::<u16>(RIRBWP) & 0xFF) as u8;
         let mut rirb = RIRB.get().unwrap().lock();

@@ -1,8 +1,9 @@
 # Roadmap
 
+- HDA sound
+- 
 - Complete shell functionality
 - proper error handling
-- HDA sound
 - Floating point support
 - Parallelism:
     - SMP (for engine)
