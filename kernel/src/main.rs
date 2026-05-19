@@ -37,7 +37,7 @@ use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::lock::NEEDS_RESCHEDULE;
-use kernel::task::mouse::print_mouse_movement;
+//use kernel::task::mouse::print_mouse_movement;
 use kernel::task::proc::{spawn_proc, ProcessControlBlock};
 use kernel::task::thread::{
     block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
@@ -137,6 +137,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
             mouse::init_ps2();
             mouse::init_ps2_mouse();
         }
+        kernel::task::mouse::init_packet_queue();
         println!("[ OK ] PS/2 Mouse initialized");
 
         unsafe {
@@ -171,8 +172,8 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     {
         let args = [c"test".as_ptr()];
-        //spawn_proc(c"shell", args.as_ptr(), 1);
-        spawn_proc(c"print_mouse_movement",args.as_ptr(),1);
+        spawn_proc(c"shell", args.as_ptr(), 1);
+        //spawn_proc(c"printmousemovement",args.as_ptr(),1);
     }
 
     hlt_loop();
@@ -315,7 +316,7 @@ async fn hda_request_verb(
 fn async_executor_task() {
     let mut executor = Executor::new();
     executor.spawn(Task::new(hda_qemu_setup()));
-    executor.spawn(Task::new(print_mouse_movement()));
+    //executor.spawn(Task::new(print_mouse_movement()));
     executor.spawn(Task::new(handle_keyboard()));
     executor.spawn(Task::new(listen_console_buffer()));
     executor.run();

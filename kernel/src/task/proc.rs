@@ -39,6 +39,8 @@ use crate::{serial_println, KernelInfo, ALLOC, KERNEL_CONFIG, PHYS_MEM_OFFSET, P
 
 pub static SHELL_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_shell"));
 pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xiangqi"));
+pub static PRINTMOUSEMOVEMENT_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_print_mouse_movement"));
+
 
 const USER_STACK_SIZE: usize = 64 * 1024;
 pub const MAX_FD: usize = 100;
@@ -531,6 +533,7 @@ fn get_program_binary(program: &'static CStr) -> &[u8] {
     match program.to_str().unwrap() {
         "shell" => SHELL_ELF,
         "xiangqi" => XIANGQI_ELF,
+        "printmousemovement" => PRINTMOUSEMOVEMENT_ELF,
         _ => {
             panic!("unrecognized program")
         }
@@ -661,8 +664,9 @@ pub fn fork(tf: &TrapFrame) -> u64 {
         ptr.write(new_tf);
     }
 
-    let ctx_start = start - 7;
-    stack[ctx_start + 6] = fork_start_hook as *const () as usize;
+    let ctx_start = start - 8;
+    stack[ctx_start + 7] = fork_start_hook as *const () as usize;
+    stack[ctx_start + 6] = 0x0000000000000202; // rflags (IF=1)
 
     let rsp = from_ref(&stack[ctx_start]);
     let rsp0 = unsafe { stack.as_ptr().add(max_stack_len) };

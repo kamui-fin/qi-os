@@ -16,6 +16,7 @@
 # calle saved: rbx, rbp, r12, r13, 14, 15
 
 switch_to_task:
+    pushfq
     push rbx
     push rbp
     push r12
@@ -51,5 +52,6 @@ switch_to_task:
     pop r12
     pop rbp
     pop rbx
+    popfq
 
     ret                           # Load next task's RIP from its kernel stack

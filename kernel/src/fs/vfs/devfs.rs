@@ -4,13 +4,14 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     console::TtyDeviceHandle,
+    driver::serial::serial_write,
     fs::vfs::{
         find_dentry, DEntry, DEntryMinimal, File, FileOps, FsMetadata, FsType, INode, INodeData,
         INodeOps, Mount, MountTable, NodeType, SuperBlock,
     },
     random::{get_rand_range, mix_entropy, mix_entropy_with},
-    tty::TTY,
     task::mouse::MouseDeviceHandle,
+    tty::TTY,
 };
 
 // major: device
@@ -72,6 +73,18 @@ impl FileOps for URandom {
             mix_entropy_with(entropy);
         }
 
+        buffer.len()
+    }
+}
+struct SerialDeviceHandle {}
+
+impl FileOps for SerialDeviceHandle {
+    fn read(&self, _: &File, _buffer: &mut [u8]) -> usize {
+        0
+    }
+
+    fn write(&self, _: &File, buffer: &[u8]) -> usize {
+        serial_write(buffer);
         buffer.len()
     }
 }
@@ -195,7 +208,22 @@ pub fn mount_devfs() -> Mount {
             dirty: false,
         }),
         ops: Arc::new(Device {
-            ops: Arc::new(MouseDeviceHandle{}),
+            ops: Arc::new(MouseDeviceHandle {}),
+        }),
+    });
+
+    let serial_inode = Arc::new(INode {
+        inum: 6,
+        fs: sb.clone(),
+        mode: NodeType::CharDevice,
+        data: INodeData::Device { major: 6, minor: 0 },
+        meta: Mutex::new(FsMetadata {
+            size: 0,
+            mtime: 0,
+            dirty: false,
+        }),
+        ops: Arc::new(Device {
+            ops: Arc::new(SerialDeviceHandle {}),
         }),
     });
 
@@ -207,6 +235,8 @@ pub fn mount_devfs() -> Mount {
     devnode_map.insert("tty1".to_string(), tty_one_inode);
 
     devnode_map.insert("mouse".to_string(), mouse_inode);
+
+    devnode_map.insert("serial".to_string(), serial_inode);
 
     let root_inode = Arc::new(INode {
         inum: 0,

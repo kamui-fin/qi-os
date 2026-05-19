@@ -74,12 +74,12 @@ pub extern "C" fn main(argc: usize, argv: *const *const c_char) -> ! {
                     "unset" => {}
                     _ => {
                         // treat as standard program
-                        /* let childpid = fork();
+                        let childpid = fork();
                         if childpid == 0 {
                             execvp(&program_name, args);
                         } else {
                             waitpid(childpid);
-                        } */
+                        }
                     }
                 }
             }
@@ -99,3 +99,4 @@ fn panic(_info: &PanicInfo) -> ! {
     exit(1);
     unreachable!();
 }
+ 

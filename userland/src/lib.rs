@@ -146,6 +146,12 @@ pub fn exit(status: u8) {
     }
 }
 
+pub fn serial_log(message: &str) {
+    let mut fd = open("/dev/serial");
+    write(fd, message.as_bytes());
+    close(fd);
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     let mut writer = ConsoleWriter;
@@ -166,6 +172,35 @@ macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
+
+// A writer for the serial port
+struct SerialWriter;
+
+impl core::fmt::Write for SerialWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        // Just call your existing serial_log
+        crate::serial_log(s);
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub fn _serial_print(args: core::fmt::Arguments) {
+    let mut writer = SerialWriter;
+    writer.write_fmt(args).unwrap();
+}
+
+#[macro_export]
+macro_rules! serial_print {
+    ($($arg:tt)*) => ($crate::_serial_print(format_args!($($arg)*)));
+}
+
+#[macro_export]
+macro_rules! serial_println {
+    () => ($crate::serial_print!("\n"));
+    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+}
+
 
 struct ConsoleWriter;
 

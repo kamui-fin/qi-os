@@ -92,15 +92,16 @@ impl ThreadControlBlock {
         // TODO: guard page
         let mut stack: Box<[usize]> = vec![0usize; max_stack_len].into_boxed_slice();
 
-        stack[max_stack_len - 8] = 0; // r15
-        stack[max_stack_len - 7] = rsp.unwrap_or_default() as usize; // r14
-        stack[max_stack_len - 6] = rip.unwrap_or_default() as usize; // r13
-        stack[max_stack_len - 5] = return_address as usize; // r12
-        stack[max_stack_len - 4] = 0; // rbp
-        stack[max_stack_len - 3] = 0; // rbx
+        stack[max_stack_len - 9] = 0; // r15
+        stack[max_stack_len - 8] = rsp.unwrap_or_default() as usize; // r14
+        stack[max_stack_len - 7] = rip.unwrap_or_default() as usize; // r13
+        stack[max_stack_len - 6] = return_address as usize; // r12
+        stack[max_stack_len - 5] = 0; // rbp
+        stack[max_stack_len - 4] = 0; // rbx
+        stack[max_stack_len - 3] = 0x0000000000000202; // rflags (IF=1, reserved bit=1)
         stack[max_stack_len - 2] = (task_startup_hook as *const ()).addr(); // actual return addr
 
-        let rsp = from_ref(&stack[max_stack_len - 8]);
+        let rsp = from_ref(&stack[max_stack_len - 9]);
         let rsp0 = from_ref(&stack[max_stack_len - 1]);
 
         let cr3 = cr3.unwrap_or_else(|| {

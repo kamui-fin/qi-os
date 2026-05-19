@@ -299,7 +299,9 @@ fn handle_ps2_byte(status: u8, data: u8) {
         unsafe {
             match ps2_mouse_state {
                 MouseDataState::WaitingForByte1 => {
-                    ps2_mouse_state = MouseDataState::WaitingForByte2(data);
+                    if data & (1 << 3) != 0 {
+                        ps2_mouse_state = MouseDataState::WaitingForByte2(data);
+                    }
                 }
                 MouseDataState::WaitingForByte2(first_byte) => {
                     ps2_mouse_state = MouseDataState::WaitingForByte3(first_byte, data);

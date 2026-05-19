@@ -32,3 +32,10 @@ pub fn _serial_print(args: fmt::Arguments) {
     SERIAL_DBG.wait().unwrap().lock().write_fmt(args).unwrap();
     })
 }
+
+pub fn serial_write(buffer: &[u8]) {
+    let mut port = SERIAL_DBG.wait().unwrap().lock();
+    for &byte in buffer {
+        port.send(byte);
+    }
+}   
