@@ -95,7 +95,7 @@ pub fn print_mouse_movement() {
 
             // syscall_notify_frame_update();
             //println!("Cursor: ({}, {})", x, y);
-            serial_println!("Cursor: ({}, {})", x, y);
+            serial_println!("{}, {}", x, y);
         }
     }
 }

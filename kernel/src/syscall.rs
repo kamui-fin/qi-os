@@ -284,7 +284,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
     let arg4 = trap_frame.r10;
     let arg5 = trap_frame.r8;
     let arg6 = trap_frame.r9;
-    serial_println!("{:#?}()", kind);
+    // serial_println!("{:#?}()", kind);
     let return_value: usize = match kind {
         SysCallKind::Fork => {
             // no args

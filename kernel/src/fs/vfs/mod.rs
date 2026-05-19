@@ -257,8 +257,6 @@ fn find_mountpoint(path: &str) -> (&Mount, String) {
     let table = MOUNT_TABLE.try_get().unwrap();
     let mut curr_path = path;
 
-    serial_println!("{:#?}", table.keys().collect::<Vec<&String>>());
-
     while !curr_path.is_empty() {
         let last_slash = curr_path.rfind('/').unwrap();
         let (parent, _) = curr_path.split_at(last_slash);

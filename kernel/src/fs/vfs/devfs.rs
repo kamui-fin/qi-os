@@ -10,6 +10,7 @@ use crate::{
         INodeOps, Mount, MountTable, NodeType, SuperBlock,
     },
     random::{get_rand_range, mix_entropy, mix_entropy_with},
+    serial_print, serial_println,
     task::mouse::MouseDeviceHandle,
     tty::TTY,
 };
@@ -84,7 +85,10 @@ impl FileOps for SerialDeviceHandle {
     }
 
     fn write(&self, _: &File, buffer: &[u8]) -> usize {
-        serial_write(buffer);
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            serial_print!("{}", core::str::from_utf8(buffer).unwrap());
+        });
+        // serial_write(buffer);
         buffer.len()
     }
 }
