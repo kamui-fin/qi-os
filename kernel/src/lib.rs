@@ -27,7 +27,6 @@ pub mod fs;
 pub mod graphics;
 pub mod interrupts;
 pub mod mem;
-pub mod pci;
 pub mod random;
 pub mod syscall;
 pub mod task;

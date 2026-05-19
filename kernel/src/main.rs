@@ -26,16 +26,14 @@ use embedded_graphics::{
 use futures_util::{FutureExt, StreamExt};
 use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, CONS};
 use kernel::driver::cmos::get_rtc_time;
+use kernel::driver::sound::corb::{CorbRespStream, RirbResponseEntry, CORB, HDA_CMD_RESP_QUEUE};
+use kernel::driver::sound::hda::{init_pci, CORBWP, HDA};
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
 use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
 use kernel::mem::allocator::init_heap;
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
-use kernel::pci::{
-    init_pci, pci_enumerate, CorbRespStream, RirbResponseEntry, CORB, CORBWP, HDA,
-    HDA_CMD_RESP_QUEUE,
-};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
 use kernel::task::executor::Executor;
 use kernel::task::lock::NEEDS_RESCHEDULE;
@@ -159,22 +157,22 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
 
     {
         let mut scheduler = SCHEDULER.lock();
-        // scheduler.spawn(2, cleaner_task as *const ());
-        // scheduler.spawn(3, compositor_task as *const ());
+        scheduler.spawn(2, cleaner_task as *const ());
+        scheduler.spawn(3, compositor_task as *const ());
         scheduler.spawn(4, async_executor_task as *const ());
-        // scheduler.spawn(5, render_tty_task as *const ());
+        scheduler.spawn(5, render_tty_task as *const ());
     }
 
-    /* println!("[ OK ] Started threads + async executor");
+    println!("[ OK ] Started threads + async executor");
     println!("Ready!");
-    println!("========================================================\n"); */
+    println!("========================================================\n");
 
     x86_64::instructions::interrupts::enable();
 
-    /* {
+    {
         let args = [c"test".as_ptr()];
         spawn_proc(c"shell", args.as_ptr(), 1);
-    } */
+    }
 
     hlt_loop();
 }
@@ -316,9 +314,9 @@ async fn hda_request_verb(
 fn async_executor_task() {
     let mut executor = Executor::new();
     executor.spawn(Task::new(hda_qemu_setup()));
-    // executor.spawn(Task::new(print_mouse_movement()));
-    // executor.spawn(Task::new(handle_keyboard()));
-    // executor.spawn(Task::new(listen_console_buffer()));
+    executor.spawn(Task::new(print_mouse_movement()));
+    executor.spawn(Task::new(handle_keyboard()));
+    executor.spawn(Task::new(listen_console_buffer()));
     executor.run();
 }
 

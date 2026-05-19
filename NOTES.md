@@ -1,32 +1,30 @@
 # Roadmap
 
-- HDA sound
-- 
-- Complete shell functionality
-- proper error handling
-- Floating point support
 - Parallelism:
     - SMP (for engine)
         - LAPIC/IOAPIC/ACPI
     - mutex / semaphore APIs
     - pthreads API + TLS
+- Complete shell functionality
 
 --- 
 
-- unit + integration testing setup
-    - Kernel debugger (quit & dump useful info on key press)
+- squash out all deadlocks & bottlenecks
+- proper error handling
 - wait queues
 - buddy + slab allocator
+- unit + integration testing setup
+    - Kernel debugger (quit & dump useful info on key press)
+- compositor:
+    - wallpaper
+    - bar
+    - borders + shadows + window btns
+    - cursor
+    - floating windows
 
 ---
 
 Wayyy into future:
-- advanced compositor:
-    - wallpaper
-    - floating windows
-    - borders
-    - workspaces
-- multiboot support
 - port doom
 - UNIX System V IPC
 - tmpfs + ext2
@@ -34,4 +32,5 @@ Wayyy into future:
 - more advanced scheduler
 - stack smash protector
 - run llm on cpu
+- multiboot support
 - TCP/IP stack

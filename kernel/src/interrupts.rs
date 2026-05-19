@@ -11,20 +11,19 @@ use core::sync::atomic::AtomicUsize;
 use crate::driver::cmos::get_rtc_time;
 use crate::driver::cmos::RTCTime;
 use crate::driver::mouse::GenericPs2Packet;
+use crate::driver::sound::corb::HDA_CMD_RESP_QUEUE;
+use crate::driver::sound::corb::RESP_WAKER;
+use crate::driver::sound::corb::RIRB;
+use crate::driver::sound::hda::PcmSample;
+use crate::driver::sound::hda::GCAP;
+use crate::driver::sound::hda::HDA;
+use crate::driver::sound::hda::INTSTS;
+use crate::driver::sound::hda::PCA_BUFFER_VIRT_START;
+use crate::driver::sound::hda::RIRBSTS;
+use crate::driver::sound::hda::RIRBWP;
+use crate::driver::sound::wav::WAV;
 use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
-use crate::pci::PcmSample;
-use crate::pci::CORB;
-use crate::pci::GCAP;
-use crate::pci::HDA;
-use crate::pci::HDA_CMD_RESP_QUEUE;
-use crate::pci::INTSTS;
-use crate::pci::PCA_BUFFER_VIRT_START;
-use crate::pci::RESP_WAKER;
-use crate::pci::RIRB;
-use crate::pci::RIRBSTS;
-use crate::pci::RIRBWP;
-use crate::pci::WAV;
 use crate::print;
 use crate::println;
 use crate::random::mix_entropy;
@@ -203,9 +202,8 @@ extern "x86-interrupt" fn hda_interrupt_handler(_stack_frame: InterruptStackFram
             // then we fill in the *next* bdlentry
             let to_fill_bdl = ((lpib / 4096) + 3) % 4;
             let samples = WAV.next_samples(1024);
-            let sample_bytes = unsafe {
-                core::slice::from_raw_parts(samples.as_ptr() as *const PcmSample, 1024)
-            };
+            let sample_bytes =
+                unsafe { core::slice::from_raw_parts(samples.as_ptr() as *const PcmSample, 1024) };
 
             let buffer_ptr = (PCA_BUFFER_VIRT_START + (4096 * to_fill_bdl)) as *mut PcmSample;
             unsafe {
