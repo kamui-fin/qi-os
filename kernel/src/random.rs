@@ -5,7 +5,7 @@
 use core::arch::asm;
 
 use conquer_once::spin::OnceCell;
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 use x86_64::instructions::{interrupts, random::RdRand};
 
 pub struct EntropyPool(u64);
@@ -91,7 +91,7 @@ impl RandomGenerator {
     }
 }
 
-pub static RAND_GEN: OnceCell<Mutex<RandomGenerator>> = OnceCell::uninit();
+pub static RAND_GEN: OnceCell<Spinlock<RandomGenerator>> = OnceCell::uninit();
 
 pub fn init_rand() {
     let hw_seeder = RdSeed::new();
@@ -106,7 +106,7 @@ pub fn init_rand() {
         }
     }
 
-    RAND_GEN.init_once(|| Mutex::new(RandomGenerator::seed(pool)))
+    RAND_GEN.init_once(|| Spinlock::new(RandomGenerator::seed(pool)))
 }
 
 pub fn mix_entropy() {
@@ -124,10 +124,10 @@ pub fn mix_entropy_with(val: u64) {
 }
 
 pub fn get_random_number() -> u64 {
-    let mutex = RAND_GEN.get().unwrap();
+    let Spinlock = RAND_GEN.get().unwrap();
     // avoid deadlocks in interrupt bc of mix_entropy
     interrupts::without_interrupts(|| {
-        let mut rand_gen = mutex.lock();
+        let mut rand_gen = Spinlock.lock();
         rand_gen.rng_next()
     })
 }

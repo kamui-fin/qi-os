@@ -10,7 +10,7 @@ use crossbeam_queue::ArrayQueue;
 use futures_util::stream::Stream;
 use futures_util::task::AtomicWaker;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 use x86_64::structures::paging::PhysFrame;
 
 use crate::serial_println;

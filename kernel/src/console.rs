@@ -15,7 +15,7 @@ use embedded_graphics::{
 };
 use futures_util::{FutureExt, StreamExt};
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 
 use crate::{
     driver::{cmos::get_unix_time, serial},
@@ -24,7 +24,6 @@ use crate::{
     serial_println,
     task::{
         keyboard::ScancodeStream,
-        thread::{switch_if_needed, SCHEDULER},
         tty::ConsoleStream,
     },
     tty::TTY,
@@ -313,10 +312,10 @@ impl Console {
 }
 
 // FIXME: vt + tty + cons relationship rn is circular
-pub static CONS: OnceCell<Mutex<Console>> = OnceCell::uninit();
+pub static CONS: OnceCell<Spinlock<Console>> = OnceCell::uninit();
 
 pub fn init_ttys() {
-    CONS.init_once(|| Mutex::new(Console::new()));
+    CONS.init_once(|| Spinlock::new(Console::new()));
 }
 
 pub async fn handle_keyboard() {

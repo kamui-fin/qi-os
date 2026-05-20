@@ -49,7 +49,7 @@ use core::{
     ptr,
 };
 use crossbeam_queue::ArrayQueue;
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::OffsetPageTable;
@@ -513,7 +513,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Pipe => {
             // arg1: pipefd int[2]
             let pipe = Pipe {
-                buffer: Mutex::new(ArrayQueue::new(4096)),
+                buffer: Spinlock::new(ArrayQueue::new(4096)),
                 readers: 1,
                 writers: 1,
             };
@@ -522,20 +522,20 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 fs: PIPE_FS.clone(),
                 mode: crate::fs::vfs::NodeType::Pipe,
                 data: crate::fs::vfs::INodeData::Pipe(Arc::new(pipe)),
-                meta: Mutex::new(FsMetadata {
+                meta: Spinlock::new(FsMetadata {
                     size: 4096,
                     mtime: 0,
                     dirty: false,
                 }),
                 ops: Arc::new(PipeInodeOps),
             });
-            let write_file = Arc::new(Mutex::new(File {
+            let write_file = Arc::new(Spinlock::new(File {
                 inode: inode.clone(),
                 pos: 0,
                 flags: OpenFlags::new(),
                 ops: Arc::new(PipeOps),
             }));
-            let read_file = Arc::new(Mutex::new(File {
+            let read_file = Arc::new(Spinlock::new(File {
                 inode: inode.clone(),
                 pos: 0,
                 flags: OpenFlags::new(),

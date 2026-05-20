@@ -55,7 +55,7 @@ use kernel::{
     serial_println, KernelInfo, RawBootInfo, KERNEL_CONFIG, PROC, SCREEN,
 };
 use kernel::{interrupts, ALLOC, BOOT_ASCII_ART, PHYS_MEM_OFFSET};
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 use volatile::VolatilePtr;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::tlb::flush_all;
@@ -147,7 +147,7 @@ fn init_boot_info(boot_info: *mut RawBootInfo) {
         },
     );
 
-    ALLOC.init_once(|| Mutex::new(allocator));
+    ALLOC.init_once(|| Spinlock::new(allocator));
 
     let boot_info = KernelInfo {
         page_table_address: boot_info.l4_table_phys_addr,
@@ -161,11 +161,11 @@ fn init_screen(boot_info: *mut RawBootInfo) {
     let screen_virt = boot_info.screen_phys_addr + boot_info.physical_memory_offset;
     let screen = unsafe { (*(screen_virt as *const BootScreenInfo)).clone() };
     let screen = Screen::new(screen);
-    SCREEN.init_once(|| Mutex::new(screen));
+    SCREEN.init_once(|| Spinlock::new(screen));
 }
 
 fn start_init_proc() {
-    PROC.init_once(|| Mutex::new(Vec::<Arc<Mutex<ProcessControlBlock>>>::with_capacity(15)));
+    PROC.init_once(|| Spinlock::new(Vec::<Arc<Spinlock<ProcessControlBlock>>>::with_capacity(15)));
 
     let args = [c"test".as_ptr()];
     spawn_proc(c"shell", args.as_ptr(), 1);

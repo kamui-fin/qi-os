@@ -22,7 +22,7 @@ use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 
 // TODO:
 // - Backspace
@@ -37,10 +37,10 @@ pub struct TTY {
     // for now, we'll be coupling VirtualTerminal
     // output_char_queue: ArrayQueue<ScreenChar>,
     completed_input_queue: ArrayQueue<u8>,
-    line_buf: Mutex<Vec<u8>>,
+    line_buf: Spinlock<Vec<u8>>,
     is_eof: AtomicBool,
 
-    pub terminal: Mutex<VirtualTerminal>,
+    pub terminal: Spinlock<VirtualTerminal>,
 }
 
 impl TTY {
@@ -48,10 +48,10 @@ impl TTY {
         Self {
             id,
             completed_input_queue: ArrayQueue::new(80 * 40),
-            line_buf: Mutex::new(Vec::with_capacity(80)),
+            line_buf: Spinlock::new(Vec::with_capacity(80)),
             is_eof: AtomicBool::new(false),
 
-            terminal: Mutex::new(VirtualTerminal::new()),
+            terminal: Spinlock::new(VirtualTerminal::new()),
         }
     }
 

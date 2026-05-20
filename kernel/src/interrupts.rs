@@ -22,6 +22,7 @@ use crate::syscall::syscall_entry;
 use crate::task::lock::NEEDS_RESCHEDULE;
 use crate::task::proc::ProcessControlBlock;
 use crate::task::proc::XIANGQI_ELF;
+use crate::task::scheduler::SCHEDULER;
 use crate::task::thread::nano_sleep;
 use crate::task::thread::switch_if_needed;
 use crate::task::thread::terminate_task;
@@ -45,8 +46,8 @@ pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: spin::Mutex<ChainedPics> =
-    spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+pub static PICS: spin::Spinlock<ChainedPics> =
+    spin::Spinlock::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]

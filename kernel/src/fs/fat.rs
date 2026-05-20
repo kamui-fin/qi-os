@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{format, slice, vec};
 use bitflags::{bitflags, Flags};
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 use x86_64::align_down;
 
 use crate::driver::cmos::get_unix_time;
@@ -880,13 +880,13 @@ impl<D: BlockDevice> Fat32<D> {
         Arc::new(INode {
             inum: dirent.entry.first_cluster() as u64,
             fs: superblock,
-            meta: Mutex::new(vfs::FsMetadata {
+            meta: Spinlock::new(vfs::FsMetadata {
                 size: dirent.entry.file_size as usize,
                 mtime: 0,
                 dirty: false,
             }),
             mode: vfs::NodeType::Directory,
-            data: INodeData::FatNode(Mutex::new(dirent)),
+            data: INodeData::FatNode(Spinlock::new(dirent)),
             ops,
         })
     }
@@ -958,14 +958,14 @@ impl<D: BlockDevice + Sync + Send + Clone + 'static> INodeOps for Fat32<D> {
             INode {
                 inum,
                 fs: parent.fs.clone(),
-                meta: Mutex::new(vfs::FsMetadata {
+                meta: Spinlock::new(vfs::FsMetadata {
                     size: d.entry.file_size as usize,
                     mtime: 0,
                     dirty: false,
                 }),
                 mode,
                 ops: parent.ops.clone(),
-                data: vfs::INodeData::FatNode(Mutex::new(d)),
+                data: vfs::INodeData::FatNode(Spinlock::new(d)),
             }
         };
 

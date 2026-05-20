@@ -1,41 +1,35 @@
+use crate::spinlock::Spinlock;
+use crate::task::scheduler::block_task;
+use crate::task::scheduler::SCHEDULER;
 use core::arch::{asm, naked_asm};
-use core::ffi::{c_str, CStr};
+use core::ffi::CStr;
+use core::mem;
 use core::ptr::from_ref;
-use core::sync::atomic::{AtomicU64, AtomicUsize};
-use core::{mem, num};
+use core::sync::atomic::AtomicU64;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use elf::abi::PT_LOAD;
 use elf::endian::LittleEndian;
 use elf::ElfBytes;
 use slab::Slab;
-use spin::{Mutex, RwLock};
-use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::MapToError;
-use x86_64::structures::paging::page::{self, PageRangeInclusive};
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{FrameAllocator, Mapper, PageTableIndex, Size4KiB, Translate};
-use x86_64::{addr, PhysAddr};
 use x86_64::{
-    structures::paging::{
-        frame::PhysFrameRangeInclusive, OffsetPageTable, Page, PageTable, PageTableFlags,
-        PhysFrame, Size2MiB,
-    },
+    structures::paging::{OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame},
     VirtAddr,
 };
 
-use crate::driver::serial;
 use crate::fs::vfs::{find_dentry, get_root_dentry, DEntry, File, OpenFlags};
 use crate::interrupts::TIME_SLICE;
-use crate::mem::gdt::GDT;
 use crate::syscall::TrapFrame;
-use crate::task::thread::{block_task, CURR_THREAD_PTR, KERNEL_STACK_SIZE, SCHEDULER};
-use crate::{mem::memory::BumpAllocator, task::thread::ThreadControlBlock};
-use crate::{serial_println, KernelInfo, ALLOC, KERNEL_CONFIG, PHYS_MEM_OFFSET, PROC};
+use crate::task::thread::ThreadControlBlock;
+use crate::task::thread::KERNEL_STACK_SIZE;
+use crate::{serial_println, ALLOC, KERNEL_CONFIG, PHYS_MEM_OFFSET, PROC};
 
 pub static SHELL_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_shell"));
 pub static XIANGQI_ELF: &[u8] = include_bytes!(env!("CARGO_BIN_FILE_USERLAND_xiangqi"));
@@ -416,7 +410,7 @@ pub struct ProcessControlBlock {
     // assume same as pid for now
     // pub main_thread_id: u64,
     pub cwd: Arc<RwLock<DEntry>>,
-    pub fd: Slab<Arc<Mutex<File>>>,
+    pub fd: Slab<Arc<Spinlock<File>>>,
 
     pub adsp: AddressSpace,
 
@@ -490,7 +484,7 @@ impl ProcessControlBlock {
         (pcb, tcb)
     }
 
-    fn setup_fd() -> Slab<Arc<Mutex<File>>> {
+    fn setup_fd() -> Slab<Arc<Spinlock<File>>> {
         let mut fds = Slab::with_capacity(MAX_FD);
 
         let tty = find_dentry("/dev/tty1");
@@ -500,19 +494,19 @@ impl ProcessControlBlock {
         let read_flags = OpenFlags::new();
         let write_flags = OpenFlags::new();
 
-        let stdin_file = Arc::new(Mutex::new(File {
+        let stdin_file = Arc::new(Spinlock::new(File {
             inode: tty.clone(),
             pos: 0,
             flags: read_flags,
             ops: tty.ops.open(&tty, read_flags),
         }));
-        let stdout_file = Arc::new(Mutex::new(File {
+        let stdout_file = Arc::new(Spinlock::new(File {
             inode: tty.clone(),
             pos: 0,
             flags: write_flags,
             ops: tty.ops.open(&tty, write_flags),
         }));
-        let stderr_file = Arc::new(Mutex::new(File {
+        let stderr_file = Arc::new(Spinlock::new(File {
             inode: tty.clone(),
             pos: 0,
             flags: write_flags,
@@ -548,9 +542,9 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
         None,
     );
     let pid = proc.pid;
-    let proc = Arc::new(Mutex::new(proc));
+    let proc = Arc::new(Spinlock::new(proc));
     main_thread.pcb = Some(proc.clone());
-    let main_thread = Arc::new(Mutex::new(main_thread));
+    let main_thread = Arc::new(Spinlock::new(main_thread));
 
     PROC.get().unwrap().lock().push(proc.clone());
 
@@ -559,24 +553,13 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
     scheduler.ready_queue.push_back(pid);
 }
 
-pub fn curr_proc() -> Arc<Mutex<ProcessControlBlock>> {
-    let curr_thread = unsafe { &*CURR_THREAD_PTR };
-    let pcb = &curr_thread.pcb;
-    pcb.clone().expect("kthread")
-}
-
-pub fn thread_for_proc(pid: u64) -> Option<Arc<Mutex<ThreadControlBlock>>> {
+pub fn thread_for_proc(pid: u64) -> Option<Arc<Spinlock<ThreadControlBlock>>> {
     let scheduler = SCHEDULER.lock();
     scheduler
         .threads
         .iter()
         .find(|p| p.lock().id == pid)
         .cloned()
-}
-
-pub fn curr_thread() -> &'static mut ThreadControlBlock {
-    let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
-    curr_thread
 }
 
 pub fn wait_pid(pid: u64) {
@@ -667,7 +650,7 @@ pub fn fork(tf: &TrapFrame) -> u64 {
     let rsp = from_ref(&stack[ctx_start]);
     let rsp0 = unsafe { stack.as_ptr().add(max_stack_len) };
 
-    let child_proc = Arc::new(Mutex::new(ProcessControlBlock {
+    let child_proc = Arc::new(Spinlock::new(ProcessControlBlock {
         pid: child_pid,
         name: og_proc.name,
         argv: og_proc.argv.clone(),
@@ -678,7 +661,7 @@ pub fn fork(tf: &TrapFrame) -> u64 {
         children: Vec::new(),
     }));
 
-    let child_tcb = Arc::new(Mutex::new(ThreadControlBlock {
+    let child_tcb = Arc::new(Spinlock::new(ThreadControlBlock {
         rsp,
         rsp0,
         cr3,

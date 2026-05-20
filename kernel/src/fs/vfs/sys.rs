@@ -1,7 +1,7 @@
 use core::ffi::CStr;
 
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 
 use crate::{
     driver::cmos::get_unix_time,
@@ -61,7 +61,7 @@ pub fn sys_open(path_addr: usize, flags: OpenFlags) -> Option<Fd> {
 
     if let Some(inode) = dentry.map(|d| d.read().inode.clone()) {
         let ops = inode.ops.open(&inode, flags);
-        let file = Arc::new(Mutex::new(File {
+        let file = Arc::new(Spinlock::new(File {
             inode,
             pos: 0,
             flags,

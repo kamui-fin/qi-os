@@ -6,7 +6,7 @@ use alloc::{sync::Arc, vec::Vec};
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 use x86_64::{
     structures::paging::{frame::PhysFrameRangeInclusive, OffsetPageTable, PageTable, Size2MiB},
     VirtAddr,
@@ -29,6 +29,7 @@ pub mod interrupts;
 pub mod lapic;
 pub mod mem;
 pub mod random;
+pub mod spinlock;
 pub mod syscall;
 pub mod task;
 pub mod tty;
@@ -57,15 +58,15 @@ pub const BOOT_ASCII_ART: &'static str = r#"
                                            \______/
                 "#;
 
-pub static SCREEN: OnceCell<Mutex<Screen>> = OnceCell::uninit();
+pub static SCREEN: OnceCell<Spinlock<Screen>> = OnceCell::uninit();
 
-pub static PROC: OnceCell<Mutex<Vec<Arc<Mutex<ProcessControlBlock>>>>> = OnceCell::uninit();
+pub static PROC: OnceCell<Spinlock<Vec<Arc<Spinlock<ProcessControlBlock>>>>> = OnceCell::uninit();
 
 // immutable
 pub static KERNEL_CONFIG: OnceCell<KernelInfo> = OnceCell::uninit();
 
-// isolating out more mutex resources
-pub static ALLOC: OnceCell<Mutex<BumpAllocator>> = OnceCell::uninit();
+// isolating out more Spinlock resources
+pub static ALLOC: OnceCell<Spinlock<BumpAllocator>> = OnceCell::uninit();
 pub const PHYS_MEM_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 pub const KERN_BASE_VIRT: u64 = 0xFFFFFFFF80000000;
 

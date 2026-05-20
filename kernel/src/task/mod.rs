@@ -7,11 +7,11 @@ use core::{
 
 pub mod executor;
 pub mod keyboard;
-pub mod lock;
 pub mod mouse;
 pub mod proc;
 pub mod thread;
 pub mod tty;
+pub mod scheduler;
 pub mod wait_queue;
 
 pub struct Task {

@@ -1,6 +1,6 @@
 use crate::acpi::{find_rsdp, get_rsdt, SdtHeader};
 use crate::mem::gdt::{init_gdt, new_gdt, new_tss, Selectors};
-use crate::task::lock::SimpleIrqLock;
+use crate::spinlock::Spinlock;
 use crate::task::proc::ProcessControlBlock;
 use crate::task::thread::{Scheduler, ThreadControlBlock};
 use crate::{hlt_loop, serial_println, PHYS_MEM_OFFSET};
@@ -11,14 +11,48 @@ use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use core::ptr::NonNull;
 use core::slice::Iter;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 use lazy_static;
-use spin::Mutex;
 use volatile::VolatilePtr;
+use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::registers::control::Cr3;
 use x86_64::registers::model_specific::GsBase;
 use x86_64::structures::gdt::GlobalDescriptorTable;
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
+
+pub struct Cpu {
+    pub apic_id: u8,
+    pub ready: AtomicBool,
+
+    // ready only
+    pub tss: &'static TaskStateSegment,
+    pub gdt: GlobalDescriptorTable,
+    pub selectors: Selectors,
+
+    pub proc: AtomicPtr<ProcessControlBlock>,
+    pub curr_thread: AtomicPtr<ThreadControlBlock>,
+    pub main_sched_thread: AtomicPtr<ThreadControlBlock>,
+
+    pub irq_disable_depth: AtomicUsize,
+    pub int_enabled: AtomicBool,
+    pub needs_resched: AtomicBool,
+}
+
+pub fn mycpu() -> &'static Cpu {
+    if x86_64::instructions::interrupts::are_enabled() {
+        panic!("mycpu() called with int enabled");
+    }
+    let cpu_ptr = GsBase::read().as_u64() as *mut Cpu;
+    unsafe { &*cpu_ptr }
+}
+
+pub fn myproc() -> *mut ProcessControlBlock {
+    without_interrupts(|| {
+        let cpu = mycpu();
+        cpu.proc.load(core::sync::atomic::Ordering::Relaxed)
+    })
+}
 
 // Local APIC registers
 const ID: u32 = 0x0020; // ID
@@ -113,11 +147,6 @@ pub fn get_lapic() -> Lapic {
     let ptr = start as *const MadtPrologue;
     let prologue = unsafe { &*ptr };
     Lapic::new(prologue.local_apic_addr as u64)
-}
-
-pub fn mycpu() -> &'static mut Cpu {
-    let cpu_ptr = GsBase::read().as_u64() as *mut Cpu;
-    unsafe { &mut *cpu_ptr }
 }
 
 fn setup_cpu(apic_id: u8) {
@@ -341,16 +370,6 @@ unsafe fn load_trampoline() {
 
     let dest = (0x8000 + PHYS_MEM_OFFSET) as *mut u8;
     core::ptr::copy_nonoverlapping(start, dest, size);
-}
-
-pub struct Cpu {
-    pub apic_id: u8,
-    pub ready: bool,
-    pub tss: &'static TaskStateSegment,
-    pub gdt: GlobalDescriptorTable,
-    pub selectors: Selectors,
-    pub scheduler: SimpleIrqLock<Scheduler>, // proc: Option<Arc<Mutex<ProcessControlBlock>>> // or *mut ptr?
-                                             // curr_thread: Arc<Mutex<ThreadControlBlock>> // or *mut ptr?
 }
 
 lazy_static::lazy_static! {

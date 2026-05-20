@@ -82,7 +82,7 @@ fn main() {
 
     // Padding for kernel sector alignment
     let padding_needed = (512 - (disk_img.len() % 512)) % 512;
-    disk_img.extend(std::iter::repeat(0).take(padding_needed));
+    disk_img.extend(std::iter::repeat_n(0, padding_needed));
 
     // Append the pristine ELF kernel
     disk_img.extend_from_slice(&kernel_data);

@@ -1,6 +1,6 @@
 use alloc::{collections::btree_map::BTreeMap, string::ToString, sync::Arc, vec::Vec};
 use conquer_once::spin::OnceCell;
-use spin::{Mutex, RwLock};
+use spin::{Spinlock, RwLock};
 
 use crate::{
     console::TtyDeviceHandle,
@@ -13,7 +13,7 @@ use crate::{
 };
 
 // major: device
-pub static DEVICE_TABLE: OnceCell<Mutex<BTreeMap<u8, Device>>> = OnceCell::uninit();
+pub static DEVICE_TABLE: OnceCell<Spinlock<BTreeMap<u8, Device>>> = OnceCell::uninit();
 
 pub struct Device {
     ops: Arc<dyn FileOps>,
@@ -130,7 +130,7 @@ pub fn mount_devfs() -> Mount {
         fs: sb.clone(),
         mode: NodeType::CharDevice,
         data: INodeData::Device { major: 1, minor: 0 },
-        meta: Mutex::new(FsMetadata {
+        meta: Spinlock::new(FsMetadata {
             size: 0,
             mtime: 0,
             dirty: false,
@@ -144,7 +144,7 @@ pub fn mount_devfs() -> Mount {
         fs: sb.clone(),
         mode: NodeType::CharDevice,
         data: INodeData::Device { major: 2, minor: 0 },
-        meta: Mutex::new(FsMetadata {
+        meta: Spinlock::new(FsMetadata {
             size: 0,
             mtime: 0,
             dirty: false,
@@ -158,7 +158,7 @@ pub fn mount_devfs() -> Mount {
         fs: sb.clone(),
         mode: NodeType::CharDevice,
         data: INodeData::Device { major: 3, minor: 0 },
-        meta: Mutex::new(FsMetadata {
+        meta: Spinlock::new(FsMetadata {
             size: 0,
             mtime: 0,
             dirty: false,
@@ -173,7 +173,7 @@ pub fn mount_devfs() -> Mount {
         fs: sb.clone(),
         mode: NodeType::CharDevice,
         data: INodeData::Device { major: 4, minor: 0 },
-        meta: Mutex::new(FsMetadata {
+        meta: Spinlock::new(FsMetadata {
             size: 0,
             mtime: 0,
             dirty: false,
@@ -194,8 +194,8 @@ pub fn mount_devfs() -> Mount {
         inum: 0,
         fs: sb.clone(),
         mode: NodeType::Directory,
-        data: INodeData::DevFs(Mutex::new(devnode_map)),
-        meta: Mutex::new(FsMetadata {
+        data: INodeData::DevFs(Spinlock::new(devnode_map)),
+        meta: Spinlock::new(FsMetadata {
             size: 0,
             mtime: 0,
             dirty: false,

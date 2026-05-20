@@ -2,7 +2,7 @@ use core::sync::atomic::AtomicU64;
 
 use alloc::{sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
-use spin::Mutex;
+use crate::spinlock::Spinlock;
 
 use crate::{
     fs::vfs::{File, FileOps, FsType, INode, INodeData, INodeOps, OpenFlags, Stat, SuperBlock},
@@ -24,7 +24,7 @@ lazy_static::lazy_static! {
 pub static PIPE_ID_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub struct Pipe {
-    pub buffer: Mutex<ArrayQueue<u8>>,
+    pub buffer: Spinlock<ArrayQueue<u8>>,
     pub readers: usize,
     pub writers: usize,
 }

@@ -69,7 +69,7 @@ impl Executor {
 
     fn sleep_if_idle(&self) {
         if self.task_queue.is_empty() {
-            crate::task::thread::block_task(BlockReason::AsyncExecutorWait);
+            crate::task::scheduler::block_task(BlockReason::AsyncExecutorWait);
         }
     }
 }

@@ -19,7 +19,7 @@ use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use elf::segment;
 use lazy_static;
-use spin::{Mutex, RwLock};
+use spin::{Spinlock, RwLock};
 
 use crate::driver::ata::{AtaDriver, BusType, DriveType};
 use crate::driver::cmos::get_unix_time;
@@ -63,8 +63,8 @@ pub enum NodeType {
 pub enum INodeData {
     Pipe(Arc<Pipe>),
     Device { major: u8, minor: u8 },
-    FatNode(Mutex<DirEntryWithLoc>),
-    DevFs(Mutex<BTreeMap<String, Arc<INode>>>),
+    FatNode(Spinlock<DirEntryWithLoc>),
+    DevFs(Spinlock<BTreeMap<String, Arc<INode>>>),
 }
 
 pub struct INode {
@@ -75,7 +75,7 @@ pub struct INode {
     pub mode: NodeType,
     pub data: INodeData,
 
-    pub meta: Mutex<FsMetadata>,
+    pub meta: Spinlock<FsMetadata>,
 
     pub ops: Arc<dyn INodeOps>,
 }
