@@ -6,7 +6,11 @@
  (for when the "task start up function" returns) that contains the address of the task itself
  (taken from an input parameter of the "create_kernel_task()" function).
 */
-// fn task_startup_hook();
+fn task_startup_hook() {
+    SCHEDULER.force_release();
+}
+
+use core::sync::atomic::Ordering;
 
 use alloc::{collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
@@ -16,7 +20,7 @@ use crate::{
     interrupts::{ELAPSED, TIME_SLICE},
     lapic::mycpu,
     serial_println,
-    spinlock::Spinlock,
+    spinlock::{Spinlock, SpinlockGuard},
     task::thread::{BlockReason, ThreadControlBlock, ThreadId, ThreadState},
 };
 
@@ -31,7 +35,7 @@ lazy_static! {
 }
 
 pub struct Scheduler {
-    pub threads: Vec<Arc<Spinlock<ThreadControlBlock>>>,
+    pub threads: Vec<ThreadControlBlock>,
     pub ready_queue: VecDeque<ThreadId>,
 }
 
@@ -45,34 +49,23 @@ impl Scheduler {
 
     pub fn pick_next_thread(&mut self) -> *mut ThreadControlBlock {
         if let Some(next_id) = self.ready_queue.pop_front() {
-            let mut next_thread = self
+            let next_thread = self
                 .threads
                 .iter_mut()
-                .find(|t| t.lock().id == next_id)
-                .expect("thread not found")
-                .lock();
+                .find(|t| t.id == next_id)
+                .expect("thread not found");
             next_thread.state = ThreadState::Running;
-            &mut *next_thread as *mut ThreadControlBlock
+            next_thread as *mut ThreadControlBlock
         } else {
             let cpu = mycpu();
-            let idle_thread = unsafe {
-                &mut *cpu
-                    .main_sched_thread
-                    .load(core::sync::atomic::Ordering::Relaxed)
-            };
+            let idle_thread = unsafe { &mut *cpu.main_sched_thread.load(Ordering::Relaxed) };
             idle_thread.state = ThreadState::Running;
             idle_thread
         }
     }
 
     pub fn spawn(&mut self, id: ThreadId, return_addr: *const ()) {
-        let new_thread = Arc::new(Spinlock::new(ThreadControlBlock::new(
-            id,
-            return_addr,
-            None,
-            None,
-            None,
-        )));
+        let new_thread = ThreadControlBlock::new(id, return_addr, None, None, None);
         self.threads.push(new_thread);
 
         if id > 2 {
@@ -81,15 +74,13 @@ impl Scheduler {
     }
 
     pub fn unblock_task(&mut self, id: ThreadId) {
-        if let Some(thread_arc) = self.threads.iter().find(|t| t.lock().id == id) {
-            let mut thread = thread_arc.lock();
+        if let Some(thread) = self.threads.iter_mut().find(|t| t.id == id) {
             if let ThreadState::Blocked(_) = thread.state {
                 thread.state = ThreadState::Ready;
                 self.ready_queue.push_back(id);
 
                 let cpu = mycpu();
-                cpu.needs_resched
-                    .store(true, core::sync::atomic::Ordering::SeqCst);
+                cpu.needs_resched.store(true, Ordering::SeqCst);
             }
         }
     }
@@ -99,40 +90,16 @@ pub fn scheduler_loop() {
     let cpu = mycpu();
 
     loop {
+        let irq_count = cpu.irq_disable_depth.load(Ordering::Relaxed);
+        assert!(irq_count > 0, "BUG: scheduling while atomic!");
+
         interrupts::enable();
 
-        let mut guard = SCHEDULER.lock();
-        let next_thread = guard.pick_next_thread();
-        switch_if_needed();
-
-        // ptable lock automatically drops
-    }
-}
-
-pub fn switch_if_needed() {
-    let cpu = mycpu();
-    let needs_schedule = cpu.needs_resched.load(core::sync::atomic::Ordering::SeqCst);
-
-    if !needs_schedule {
-        return;
-    }
-
-    // this should never happen!!
-    let irq_count = cpu
-        .irq_disable_depth
-        .load(core::sync::atomic::Ordering::Relaxed);
-    if irq_count > 0 {
-        panic!("BUG: scheduling while atomic!");
-    }
-
-    // clear flag
-    cpu.needs_resched
-        .store(false, core::sync::atomic::Ordering::SeqCst);
-    let next_thread = {
         let mut scheduler = SCHEDULER.lock();
 
-        let curr_thread =
-            unsafe { &mut *cpu.curr_thread.load(core::sync::atomic::Ordering::Relaxed) };
+        cpu.needs_resched.store(false, Ordering::SeqCst);
+
+        let curr_thread = unsafe { &mut *cpu.curr_thread.load(Ordering::Relaxed) };
         if curr_thread.state == ThreadState::Running && curr_thread.id != 1 {
             curr_thread.state = ThreadState::Ready;
             curr_thread.time_slice_remaining = TIME_SLICE;
@@ -140,51 +107,81 @@ pub fn switch_if_needed() {
             scheduler.ready_queue.push_back(curr_thread.id);
         }
 
-        scheduler.pick_next_thread()
-    };
+        let next_thread = scheduler.pick_next_thread();
 
-    if let Some(next_thread) = next_thread {
+        cpu.curr_thread.store(next_thread, Ordering::Relaxed);
+
         unsafe {
             switch_to_task(next_thread);
         }
     }
 }
 
-pub fn block_task(reason: BlockReason) {
-    {
-        let _guard = SCHEDULER.lock();
+fn switch_to_scheduler() {
+    // assert!(is_holding(SCHEDULER))
+    // assert!(mycpu().ncli == 1)
+    // assert!(curr_thread.state != RUNNING)
+    // assert!(interrupts_enabled == false)
 
-        let cpu = mycpu();
-        let curr_thread =
-            unsafe { &mut *cpu.curr_thread.load(core::sync::atomic::Ordering::Relaxed) };
-        serial_println!("Blocking {} for {:#?}", curr_thread.id, reason);
-        curr_thread.state = ThreadState::Blocked(reason);
-        curr_thread.time_slice_remaining = TIME_SLICE;
-
-        cpu.needs_resched
-            .store(true, core::sync::atomic::Ordering::SeqCst);
+    let cpu = mycpu();
+    let int_enabled = cpu.int_enabled.load(Ordering::SeqCst);
+    let sched_thread = cpu.main_sched_thread.load(Ordering::SeqCst);
+    unsafe {
+        switch_to_task(sched_thread);
     }
-
-    switch_if_needed();
+    cpu.int_enabled.store(int_enabled, Ordering::SeqCst)
 }
 
-pub fn block_task_drop_lock<L>(reason: BlockReason, lock: L) {
-    {
-        let _guard = SCHEDULER.lock();
+pub fn yield_sched() {
+    let mut scheduler = SCHEDULER.lock();
 
-        let cpu = mycpu();
-        let curr_thread =
-            unsafe { &mut *cpu.curr_thread.load(core::sync::atomic::Ordering::Relaxed) };
-        curr_thread.state = ThreadState::Blocked(reason);
-        curr_thread.time_slice_remaining = TIME_SLICE;
+    let cpu = mycpu();
+    let curr_thread = unsafe { &mut *cpu.curr_thread.load(Ordering::Relaxed) };
+    curr_thread.state = ThreadState::Ready;
+    curr_thread.time_slice_remaining = TIME_SLICE;
+    scheduler.ready_queue.push_back(curr_thread.id);
 
-        cpu.needs_resched
-            .store(true, core::sync::atomic::Ordering::SeqCst);
+    switch_to_scheduler();
+}
 
-        drop(lock);
-    }
+pub fn block_task(reason: BlockReason) {
+    let _guard = SCHEDULER.lock();
 
-    switch_if_needed();
+    let cpu = mycpu();
+    let curr_thread = unsafe { &mut *cpu.curr_thread.load(Ordering::Relaxed) };
+    serial_println!("Blocking {} for {:#?}", curr_thread.id, reason);
+    curr_thread.state = ThreadState::Blocked(reason);
+    curr_thread.time_slice_remaining = TIME_SLICE;
+
+    cpu.needs_resched.store(true, Ordering::SeqCst);
+
+    switch_to_scheduler();
+}
+
+pub fn block_task_with_lock<'a, T>(
+    reason: BlockReason,
+    old_guard: SpinlockGuard<'a, T>,
+    lock: &'a Spinlock<T>,
+) -> SpinlockGuard<'a, T> {
+    let cpu = mycpu();
+    let irq_count = cpu.irq_disable_depth.load(Ordering::Relaxed);
+    assert!(irq_count > 1, "only allowed to hold 1 spinlock");
+
+    let _sched_guard = SCHEDULER.lock();
+
+    old_guard.into_raw();
+    lock.force_release();
+
+    let curr_thread = unsafe { &mut *cpu.curr_thread.load(Ordering::Relaxed) };
+    curr_thread.state = ThreadState::Blocked(reason);
+    curr_thread.time_slice_remaining = TIME_SLICE;
+
+    cpu.needs_resched.store(true, Ordering::SeqCst);
+
+    switch_to_scheduler();
+
+    drop(_sched_guard); // follow strict lock ordering
+    lock.lock()
 }
 
 pub fn terminate_task(status: u8) {
@@ -194,25 +191,6 @@ pub fn terminate_task(status: u8) {
     }
 
     block_task(BlockReason::Terminated(status));
-}
-
-pub fn yield_sched() {
-    {
-        let mut scheduler = SCHEDULER.lock();
-
-        let cpu = mycpu();
-        let curr_thread =
-            unsafe { &mut *cpu.curr_thread.load(core::sync::atomic::Ordering::Relaxed) };
-        curr_thread.state = ThreadState::Ready;
-        curr_thread.time_slice_remaining = TIME_SLICE;
-
-        scheduler.ready_queue.push_back(curr_thread.id);
-
-        cpu.needs_resched
-            .store(true, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    switch_if_needed();
 }
 
 pub fn nano_sleep(nano_sec: u64) {
@@ -227,5 +205,5 @@ fn nano_sleep_until(abs_time: u64) {
 }
 
 pub fn get_time_since_boot() -> u64 {
-    ELAPSED.load(core::sync::atomic::Ordering::Relaxed) * 1_000_000
+    ELAPSED.load(Ordering::Relaxed) * 1_000_000
 }
