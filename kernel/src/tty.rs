@@ -5,14 +5,15 @@
 
 use core::sync::atomic::AtomicBool;
 
+use crate::spinlock::Spinlock;
+use crate::task::scheduler::{SCHEDULER, block_task};
 use crate::{
     console::{wake_tty_renderer, Color, ColorCode, ScreenChar, VirtualTerminal},
     fs::vfs::FileOps,
     print, serial_print, serial_println,
     task::{
         keyboard::ScancodeStream,
-        proc::thread_for_proc,
-        thread::{block_task, BlockReason, ThreadState, SCHEDULER},
+        thread::{BlockReason, ThreadState},
         tty::{self},
     },
     PROC,
@@ -22,7 +23,6 @@ use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use futures_util::stream::StreamExt;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
-use crate::spinlock::Spinlock;
 
 // TODO:
 // - Backspace
@@ -170,12 +170,13 @@ impl TTY {
 
     // TODO: very primitive, switch to wait queue ASAP
     fn wakeup_readers(&self) {
+        let mut sched = SCHEDULER.lock();
         let readers_to_wake = {
             let mut threads = Vec::new();
             let procs = PROC.get().unwrap().lock();
             for proc in procs.iter() {
-                let thread = thread_for_proc(proc.lock().pid).unwrap();
-                let thread = thread.lock();
+                let pid = proc.lock().pid;
+                let thread = sched.threads.iter().find(|t| t.id == pid).unwrap();
                 if let ThreadState::Blocked(BlockReason::WaitStdin(tty_num)) = thread.state {
                     if self.id == tty_num {
                         threads.push(thread.id);
@@ -186,7 +187,6 @@ impl TTY {
             threads
         };
         for id in readers_to_wake {
-            let mut sched = SCHEDULER.lock();
             sched.unblock_task(id);
         }
     }

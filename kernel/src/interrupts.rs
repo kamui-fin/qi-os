@@ -1,38 +1,36 @@
-use core::arch::asm;
-use core::arch::naked_asm;
-use core::ffi::c_char;
-use core::ffi::c_str;
-use core::ffi::CStr;
-use core::num;
-use core::ptr;
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::AtomicUsize;
-
 use crate::driver::cmos::get_rtc_time;
 use crate::driver::cmos::RTCTime;
 use crate::driver::mouse::GenericPs2Packet;
-use crate::fs::vfs::get_root_dentry;
 use crate::hlt_loop;
+use crate::lapic::mycpu;
+use crate::lapic::CPU;
+use crate::lapic::IOAPIC;
+use crate::lapic::LAPIC;
 use crate::print;
 use crate::println;
 use crate::random::mix_entropy;
 use crate::serial_print;
 use crate::serial_println;
+use crate::spinlock::Spinlock;
 use crate::syscall::syscall_entry;
-use crate::task::lock::NEEDS_RESCHEDULE;
 use crate::task::proc::ProcessControlBlock;
 use crate::task::proc::XIANGQI_ELF;
+use crate::task::scheduler::switch_if_needed;
 use crate::task::scheduler::SCHEDULER;
-use crate::task::thread::nano_sleep;
-use crate::task::thread::switch_if_needed;
-use crate::task::thread::terminate_task;
 use crate::task::thread::BlockReason;
 use crate::task::thread::ThreadControlBlock;
 use crate::task::thread::ThreadState;
-use crate::task::thread::CURR_THREAD_PTR;
+use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
+use core::arch::asm;
+use core::arch::naked_asm;
+use core::ffi::CStr;
+use core::num;
+use core::ptr;
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
 use lazy_static::lazy_static;
-use spin;
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::PageFaultErrorCode;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -44,16 +42,12 @@ pub const TIME_SLICE: usize = 100 * 1_000_000;
 pub const TIME_BETWEEN_TICKS: usize = 1 * 1_000_000;
 
 pub const PIC_1_OFFSET: u8 = 32;
-pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-
-pub static PICS: spin::Spinlock<ChainedPics> =
-    spin::Spinlock::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
-    Keyboard,
+    Keyboard = PIC_1_OFFSET + 1,
     PS2 = PIC_1_OFFSET + 12,
 }
 
@@ -64,6 +58,24 @@ impl InterruptIndex {
 
     fn as_usize(self) -> usize {
         usize::from(self.as_u8())
+    }
+}
+
+pub fn init_ioapic_legacy() {
+    IOAPIC.get().unwrap().init();
+    let ioapic = IOAPIC.get().unwrap();
+    let cpus = CPU.lock();
+
+    let irq_mapping = [
+        // (0, InterruptIndex::Timer.as_u8()),
+        (1, InterruptIndex::Keyboard.as_u8()),
+        (12, InterruptIndex::PS2.as_u8()),
+    ];
+
+    let mut index = 0;
+    for &(irq, vector) in &irq_mapping {
+        ioapic.enable(irq as u32, vector as u32, cpus[index] as u32);
+        index = (index + 1) % cpus.len();
     }
 }
 
@@ -118,7 +130,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         BOOT_RTC.init_once(|| get_rtc_time());
     }
     // 1 ms passed by
-    let curr_time = ELAPSED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let curr_time = ELAPSED.fetch_add(1, Ordering::Relaxed) + 1;
     let curr_time_ns = curr_time * 1_000_000;
 
     {
@@ -126,7 +138,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         let mut to_wake = [0u64; 15];
         let mut count = 0;
         for thread in scheduler.threads.iter() {
-            let thread = thread.lock();
             if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
                 if expire_time <= curr_time_ns {
                     to_wake[count] = thread.id;
@@ -138,29 +149,30 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
             scheduler.unblock_task(to_wake[i]);
         }
 
-        let curr_thread = unsafe { &mut *CURR_THREAD_PTR };
+        let cpu = mycpu();
+        let curr_thread = unsafe { &mut *(cpu.curr_thread.load(Ordering::SeqCst)) };
         if curr_thread.id != 1 {
             if curr_thread.time_slice_remaining <= TIME_BETWEEN_TICKS {
                 curr_thread.time_slice_remaining = TIME_SLICE;
                 curr_thread.state = ThreadState::Ready;
                 scheduler.ready_queue.push_back(curr_thread.id);
-                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+                cpu.needs_resched.store(true, Ordering::SeqCst);
             } else {
                 curr_thread.time_slice_remaining -= TIME_BETWEEN_TICKS;
             }
         } else {
             if !scheduler.ready_queue.is_empty() {
-                NEEDS_RESCHEDULE.store(true, core::sync::atomic::Ordering::SeqCst);
+                cpu.needs_resched.store(true, Ordering::SeqCst);
             }
         }
     }
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
-
+    eoc();
     switch_if_needed();
+}
+
+fn eoc() {
+    LAPIC.get().unwrap().ack();
 }
 
 enum MouseDataState {
@@ -183,11 +195,8 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
             status = status_port.read();
         }
     }
-
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::PS2.as_u8());
-    }
+    eoc();
+    switch_if_needed();
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -202,11 +211,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
             status = status_port.read();
         }
     }
-
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    eoc();
+    switch_if_needed();
 }
 
 fn handle_ps2_byte(status: u8, data: u8) {
@@ -243,13 +249,11 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     use x86_64::registers::control::Cr2;
 
-    serial_println!("EXCEPTION: PAGE FAULT");
-
     serial_println!(
         r#"EXCEPTION: PAGE FAULT
-                    Accessed Address: {:?}
-                    Error Code: {:?}
-                    {:#?}"#,
+Accessed Address: {:?}
+Error Code: {:?}
+{:#?}"#,
         Cr2::read(),
         error_code,
         stack_frame

@@ -1,5 +1,6 @@
 use crate::serial_println;
-use crate::task::thread::{block_task, BlockReason, SCHEDULER};
+use crate::task::scheduler::SCHEDULER;
+use crate::task::thread::BlockReason;
 
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -54,8 +55,7 @@ impl Executor {
                     tasks.remove(&task_id);
                     waker_cache.remove(&task_id);
                 }
-                Poll::Pending => {
-                }
+                Poll::Pending => {}
             }
         }
     }

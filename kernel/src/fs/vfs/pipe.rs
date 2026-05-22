@@ -1,15 +1,18 @@
 use core::sync::atomic::AtomicU64;
 
+use crate::{
+    spinlock::Spinlock,
+    task::{
+        scheduler::{block_task_with_lock, SCHEDULER},
+        thread::ThreadControlBlock,
+    },
+};
 use alloc::{sync::Arc, vec::Vec};
 use crossbeam_queue::ArrayQueue;
-use crate::spinlock::Spinlock;
 
 use crate::{
     fs::vfs::{File, FileOps, FsType, INode, INodeData, INodeOps, OpenFlags, Stat, SuperBlock},
-    task::{
-        proc::thread_for_proc,
-        thread::{block_task_drop_lock, BlockReason, ThreadState, SCHEDULER},
-    },
+    task::thread::{BlockReason, ThreadState},
     PROC,
 };
 
@@ -85,7 +88,7 @@ impl FileOps for PipeOps {
             }
 
             // sleep throw into wait queue
-            block_task_drop_lock(BlockReason::WaitPipeRead(pipe_id), guard)
+            block_task_with_lock(BlockReason::WaitPipeRead(pipe_id), guard, &pipe.buffer);
         }
 
         if bytes_read > 0 {
@@ -111,7 +114,7 @@ impl FileOps for PipeOps {
                     if pipe.readers == 0 {
                         return bytes_write;
                     }
-                    block_task_drop_lock(BlockReason::WaitPipeWrite(pipe_id), guard)
+                    block_task_with_lock(BlockReason::WaitPipeWrite(pipe_id), guard, &pipe.buffer);
                 } else {
                     for byte in chunk {
                         guard.push(*byte);
@@ -136,13 +139,16 @@ enum Direction {
     Write,
 }
 
-// TODO: obviously this is O(n) but its a quick directly
+// TODO: obviously this is O(n) but its a quick n dirty
 fn wake_pipe_sleepers(pipe_id: u64, dir: Direction) {
     let procs = PROC.get().unwrap().lock();
     let mut to_wake = Vec::new();
+    let mut sched = SCHEDULER.lock();
+
     for proc in procs.iter() {
-        let thread = thread_for_proc(proc.lock().pid).unwrap();
-        let thread = thread.lock();
+        let pid = proc.lock().pid;
+        let thread = sched.threads.iter().find(|t| t.id == pid).unwrap();
+
         match (&dir, &thread.state) {
             (Direction::Read, ThreadState::Blocked(BlockReason::WaitPipeRead(waiting_on)))
             | (Direction::Write, ThreadState::Blocked(BlockReason::WaitPipeWrite(waiting_on))) => {
@@ -153,7 +159,6 @@ fn wake_pipe_sleepers(pipe_id: u64, dir: Direction) {
             _ => {}
         };
     }
-    let mut sched = SCHEDULER.lock();
     for thread_id in to_wake {
         sched.unblock_task(thread_id);
     }

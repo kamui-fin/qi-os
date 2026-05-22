@@ -28,26 +28,26 @@ use futures_util::{FutureExt, StreamExt};
 use kernel::acpi::{find_rsdp, get_rsdt, SdtHeader};
 use kernel::console::{handle_keyboard, init_ttys, listen_console_buffer, CONS};
 use kernel::driver::cmos::get_rtc_time;
+use kernel::driver::pit::global_lapic_timer_init;
 use kernel::fs::fat::{BlockDevice, FSInfo, Fat32, BPB};
 use kernel::fs::ustar::{octascii_to_dec, USTAR};
 use kernel::fs::vfs::{get_root_dentry, init_vfs};
 use kernel::graphics::{BootScreenInfo, Screen};
+use kernel::interrupts::init_ioapic_legacy;
 use kernel::lapic::{
-    cpu_common, find_cpus, init_lapic, ioapic_init, mycpu, pic_disable, start_other_cpus,
+    cpu_common, find_cpus, get_lapic, init_lapic, mycpu, pic_disable, setup_cpu, start_other_cpus,
+    LAPIC,
 };
 use kernel::mem::allocator::init_heap;
-use kernel::mem::gdt::init_gdt;
+use kernel::mem::gdt::{init_gdt, new_gdt, new_tss};
 use kernel::mem::memory::{BumpAllocator, MemoryMapEntry, UsedRegion};
 use kernel::random::{get_rand_range, get_random_number, init_rand};
+use kernel::spinlock::Spinlock;
 use kernel::task::executor::Executor;
-use kernel::task::lock::NEEDS_RESCHEDULE;
 use kernel::task::mouse::print_mouse_movement;
 use kernel::task::proc::{spawn_proc, ProcessControlBlock};
-use kernel::task::thread::{
-    block_task, get_time_since_boot, nano_sleep, switch_if_needed, switch_to_task, terminate_task,
-    yield_sched, BlockReason, Scheduler, ThreadControlBlock, ThreadState, CURR_THREAD_PTR,
-    MAIN_THREAD, SCHEDULER,
-};
+use kernel::task::scheduler::{block_task, SCHEDULER};
+use kernel::task::thread::{BlockReason, ThreadState};
 use kernel::task::tty::init_console_char_queue;
 use kernel::task::Task;
 use kernel::{
@@ -55,11 +55,12 @@ use kernel::{
     serial_println, KernelInfo, RawBootInfo, KERNEL_CONFIG, PROC, SCREEN,
 };
 use kernel::{interrupts, ALLOC, BOOT_ASCII_ART, PHYS_MEM_OFFSET};
-use crate::spinlock::Spinlock;
 use volatile::VolatilePtr;
 use x86_64::instructions::interrupts::without_interrupts;
+use x86_64::instructions::tables::load_tss;
 use x86_64::instructions::tlb::flush_all;
 use x86_64::registers::control::{Cr3, Cr3Flags};
+use x86_64::registers::model_specific::GsBase;
 use x86_64::structures::paging::frame::{self, PhysFrameRangeInclusive};
 use x86_64::structures::paging::{
     page, FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags,
@@ -71,38 +72,48 @@ extern crate alloc;
 
 #[no_mangle]
 pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
-    init_gdt(&mycpu().gdt, &mycpu().selectors);
-
+    crate::interrupts::init_idt();
     kernel::driver::serial::init();
+
     init_boot_info(boot_info);
     init_kheap();
 
-    let (lapic, entries) = find_cpus();
-    let bsp = init_lapic(&lapic);
+    let lapic = get_lapic();
+    LAPIC.init_once(|| lapic);
+
+    let bsp = init_lapic();
+    let cpu_raw = setup_cpu(bsp);
+    GsBase::write(VirtAddr::new(cpu_raw as u64));
+
+    init_gdt(&mycpu().gdt, &mycpu().selectors);
+    unsafe { load_tss(mycpu().selectors.tss_selector) };
+
     pic_disable();
-    ioapic_init();
 
     init_screen(boot_info);
     init_console_char_queue();
     init_ttys();
 
-    kernel::driver::pit::init_pit(); // needs fixing?
+    // Legacy
+    // kernel::driver::pit::init_pit();
+    global_lapic_timer_init();
 
-    mouse::init_ps2();
-    mouse::init_ps2_mouse();
+    /* mouse::init_ps2();
+    mouse::init_ps2_mouse(); */
 
-    init_kmain();
     init_rand();
     init_vfs();
 
-    start_other_cpus(lapic, bsp);
+    let entries = find_cpus();
+    start_other_cpus(entries.iter(), bsp);
+
+    // println!("{}", BOOT_ASCII_ART);
+
+    init_ioapic_legacy();
+
     start_threads();
-
-    println!("{}", BOOT_ASCII_ART);
-
     start_init_proc();
 
-    x86_64::instructions::interrupts::enable();
     cpu_common(bsp as u64);
 }
 
@@ -110,13 +121,6 @@ fn init_kheap() {
     let mut alloc = ALLOC.get().unwrap().lock();
     let mut mapper = unsafe { memory::init(VirtAddr::new(PHYS_MEM_OFFSET)) };
     allocator::init_heap(&mut mapper, &mut *alloc).expect("heap initialization failed");
-}
-
-fn init_kmain() {
-    unsafe {
-        MAIN_THREAD = Box::into_raw(Box::new(ThreadControlBlock::kmain()));
-        CURR_THREAD_PTR = MAIN_THREAD;
-    }
 }
 
 fn start_threads() {
@@ -243,7 +247,7 @@ fn cleaner_task() {
             let mut scheduler = SCHEDULER.lock();
             let task_index = scheduler.threads.iter().position(|t| {
                 if let ThreadState::Blocked(kernel::task::thread::BlockReason::Terminated(_)) =
-                    t.lock().state
+                    t.state
                 {
                     true
                 } else {

@@ -15,7 +15,7 @@ use embedded_graphics::{
 };
 use futures_util::{FutureExt, StreamExt};
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
-use crate::spinlock::Spinlock;
+use crate::{spinlock::Spinlock, task::scheduler::SCHEDULER};
 
 use crate::{
     driver::{cmos::get_unix_time, serial},

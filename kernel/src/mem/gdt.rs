@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+use alloc::vec;
 use lazy_static::lazy_static;
 use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
 use x86_64::instructions::tables::load_tss;
@@ -7,10 +9,7 @@ use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
-
-// TODO: switch.s needs to access per-cpu tss
-/* #[no_mangle]
-pub static mut TSS_POINTER: *mut TaskStateSegment = core::ptr::null_mut(); */
+const STACK_SIZE: usize = 4096 * 5;
 
 pub struct Selectors {
     pub code_selector: SegmentSelector,
@@ -23,10 +22,9 @@ pub struct Selectors {
 pub fn new_tss() -> TaskStateSegment {
     let mut tss = TaskStateSegment::new();
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-        const STACK_SIZE: usize = 4096 * 5;
-        static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-        let stack_start = VirtAddr::from_ptr(&raw const STACK);
+        let stack = vec![0u8; STACK_SIZE].into_boxed_slice();
+        let stack = Box::into_raw(stack) as *mut u8;
+        let stack_start = VirtAddr::from_ptr(stack);
         let stack_end = stack_start + STACK_SIZE;
         stack_end
     };
@@ -59,6 +57,5 @@ pub fn init_gdt(gdt: &'static GlobalDescriptorTable, selectors: &Selectors) {
         SS::set_reg(selectors.data_selector);
         DS::set_reg(selectors.data_selector);
         ES::set_reg(selectors.data_selector);
-        load_tss(selectors.tss_selector);
     }
 }

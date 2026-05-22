@@ -53,9 +53,11 @@ pub const KERNEL_STACK_SIZE: usize = 1 * Size2MiB::SIZE as usize;
 #[unsafe(naked)]
 pub unsafe extern "C" fn task_startup_hook() {
     naked_asm!(
+        "call {release_sched}",
         "sti",
         "call r12",
         "call {terminate}",
+        release_sched = sym crate::task::scheduler::release_scheduler_hook,
         terminate = sym crate::task::scheduler::terminate_task,
     );
 }

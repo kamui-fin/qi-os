@@ -1,3 +1,7 @@
+use crate::lapic::my_proc;
+use crate::lapic::my_thread;
+use crate::lapic::mycpu;
+use crate::rwlock::RwLock;
 use crate::spinlock::Spinlock;
 use crate::task::scheduler::block_task;
 use crate::task::scheduler::SCHEDULER;
@@ -16,6 +20,7 @@ use elf::abi::PT_LOAD;
 use elf::endian::LittleEndian;
 use elf::ElfBytes;
 use slab::Slab;
+use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::page_table::PageTableEntry;
 use x86_64::structures::paging::{FrameAllocator, Mapper, PageTableIndex, Size4KiB, Translate};
@@ -544,8 +549,6 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
     let pid = proc.pid;
     let proc = Arc::new(Spinlock::new(proc));
     main_thread.pcb = Some(proc.clone());
-    let main_thread = Arc::new(Spinlock::new(main_thread));
-
     PROC.get().unwrap().lock().push(proc.clone());
 
     let mut scheduler = SCHEDULER.lock();
@@ -553,18 +556,9 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
     scheduler.ready_queue.push_back(pid);
 }
 
-pub fn thread_for_proc(pid: u64) -> Option<Arc<Spinlock<ThreadControlBlock>>> {
-    let scheduler = SCHEDULER.lock();
-    scheduler
-        .threads
-        .iter()
-        .find(|p| p.lock().id == pid)
-        .cloned()
-}
-
 pub fn wait_pid(pid: u64) {
     let is_child = {
-        let p = curr_proc();
+        let p = my_proc();
         let p = p.lock();
         p.children.contains(&pid)
     };
@@ -584,7 +578,7 @@ pub fn exec(
     let cr3 = addr_space.cr3;
     let (argv, rsp) = addr_space.copy_args_to_stack(argv, argc, program);
 
-    let p = curr_proc();
+    let p = my_proc();
     let mut p = p.lock();
 
     let rip = addr_space.program_start;
@@ -594,14 +588,19 @@ pub fn exec(
     p.adsp = addr_space;
     p.argv = argv;
 
-    let t = curr_thread();
+    let t = my_thread();
     t.cr3 = cr3 as *const usize;
 
     tf.zero_out();
     tf.rip = rip as usize;
     tf.rsp = rsp as usize;
-    tf.cs = GDT.1.user_code_selector.0 as usize;
-    tf.ss = GDT.1.user_data_selector.0 as usize;
+
+    without_interrupts(|| {
+        let cpu = mycpu();
+        tf.cs = cpu.selectors.user_code_selector.0 as usize;
+        tf.ss = cpu.selectors.user_data_selector.0 as usize;
+    });
+
     tf.rflags = 0x0000000000000202; // reserved bit 1 + IF interrupt
 
     unsafe {
@@ -625,7 +624,7 @@ pub unsafe extern "C" fn fork_start_hook() {
 pub fn fork(tf: &TrapFrame) -> u64 {
     let child_pid = PID.fetch_add(1u64, core::sync::atomic::Ordering::Relaxed);
 
-    let og_proc = curr_proc();
+    let og_proc = my_proc();
     let mut og_proc = og_proc.lock();
 
     let mut new_tf = tf.clone();
@@ -661,7 +660,7 @@ pub fn fork(tf: &TrapFrame) -> u64 {
         children: Vec::new(),
     }));
 
-    let child_tcb = Arc::new(Spinlock::new(ThreadControlBlock {
+    let child_tcb = ThreadControlBlock {
         rsp,
         rsp0,
         cr3,
@@ -670,7 +669,7 @@ pub fn fork(tf: &TrapFrame) -> u64 {
         stack,
         time_slice_remaining: TIME_SLICE,
         pcb: Some(child_proc.clone()),
-    }));
+    };
 
     og_proc.children.push(child_pid);
 

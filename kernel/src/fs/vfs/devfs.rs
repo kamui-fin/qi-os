@@ -1,6 +1,6 @@
+use crate::{rwlock::RwLock, spinlock::Spinlock};
 use alloc::{collections::btree_map::BTreeMap, string::ToString, sync::Arc, vec::Vec};
 use conquer_once::spin::OnceCell;
-use spin::{Spinlock, RwLock};
 
 use crate::{
     console::TtyDeviceHandle,

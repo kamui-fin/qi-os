@@ -1,5 +1,4 @@
 use crate::console::{Color, ColorCode, ScreenChar};
-use crate::driver::serial;
 use conquer_once::spin::OnceCell;
 use core::fmt::{self, Write};
 use core::{
@@ -9,9 +8,6 @@ use core::{
 use crossbeam_queue::ArrayQueue;
 use futures_util::stream::Stream;
 use futures_util::task::AtomicWaker;
-use lazy_static::lazy_static;
-use crate::spinlock::Spinlock;
-use x86_64::structures::paging::PhysFrame;
 
 use crate::serial_println;
 

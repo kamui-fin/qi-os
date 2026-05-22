@@ -2,11 +2,11 @@
 #![no_std]
 #![no_main]
 
+use crate::spinlock::Spinlock;
 use alloc::{sync::Arc, vec::Vec};
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use lazy_static::lazy_static;
-use crate::spinlock::Spinlock;
 use x86_64::{
     structures::paging::{frame::PhysFrameRangeInclusive, OffsetPageTable, PageTable, Size2MiB},
     VirtAddr,
@@ -29,6 +29,7 @@ pub mod interrupts;
 pub mod lapic;
 pub mod mem;
 pub mod random;
+pub mod rwlock;
 pub mod spinlock;
 pub mod syscall;
 pub mod task;

@@ -15,19 +15,20 @@ pub struct Spinlock<T> {
 
 unsafe impl<T: Send> Sync for Spinlock<T> {}
 
-fn pushcli() {
+pub fn pushcli() {
+    let enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
     let cpu = mycpu();
     if cpu.irq_disable_depth.load(Ordering::SeqCst) == 0 {
         cpu.int_enabled.store(
-            x86_64::instructions::interrupts::are_enabled(),
+            enabled,
             Ordering::SeqCst,
         );
     }
-    x86_64::instructions::interrupts::disable();
     cpu.irq_disable_depth.fetch_add(1, Ordering::SeqCst);
 }
 
-fn popcli() {
+pub fn popcli() {
     let cpu = mycpu();
     if cpu.irq_disable_depth.load(Ordering::SeqCst) == 0 {
         panic!("cannot popcli; depth = 0");

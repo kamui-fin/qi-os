@@ -19,7 +19,6 @@ use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use elf::segment;
 use lazy_static;
-use spin::{Spinlock, RwLock};
 
 use crate::driver::ata::{AtaDriver, BusType, DriveType};
 use crate::driver::cmos::get_unix_time;
@@ -27,8 +26,10 @@ use crate::fs::fat::{BlockDevice, DirEntryWithLoc, FSInfo, Fat32, BPB};
 use crate::fs::ustar::USTAR;
 use crate::fs::vfs::devfs::mount_devfs;
 use crate::fs::vfs::pipe::Pipe;
-use crate::task::proc::curr_proc;
-use crate::task::thread::{block_task, block_task_drop_lock, BlockReason, ThreadState, SCHEDULER};
+use crate::lapic::my_proc;
+use crate::rwlock::RwLock;
+use crate::spinlock::Spinlock;
+use crate::task::thread::{BlockReason, ThreadState};
 use crate::{serial_println, PROC};
 
 pub static MOUNT_TABLE: OnceCell<MountTable> = OnceCell::uninit();
@@ -343,7 +344,7 @@ pub fn find_dentry(path: &str) -> Option<Arc<RwLock<DEntry>>> {
 }
 
 fn join_path_with_cwd(path: &str) -> String {
-    let p = curr_proc();
+    let p = my_proc();
     let p = p.lock();
     let cwd = full_path(p.cwd.clone());
     if cwd == "/" {

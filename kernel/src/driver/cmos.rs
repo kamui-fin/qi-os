@@ -146,9 +146,14 @@ pub fn get_rtc_time() -> RTCTime {
 
 // We'll use UNIX
 pub fn get_unix_time() -> u64 {
+    if !BOOT_RTC.is_initialized() {
+        BOOT_RTC.init_once(|| get_rtc_time());
+    }
+
     let elapsed_sec = ELAPSED
         .load(core::sync::atomic::Ordering::Relaxed)
         .div_ceil(1000) as usize;
+
     let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
     let unix_time = elapsed_sec + boot_unix;
     unix_time as u64

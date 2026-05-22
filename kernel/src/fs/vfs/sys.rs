@@ -1,18 +1,17 @@
 use core::ffi::CStr;
 
+use crate::{lapic::my_proc, spinlock::Spinlock};
 use alloc::sync::Arc;
-use crate::spinlock::Spinlock;
 
 use crate::{
     driver::cmos::get_unix_time,
     fs::vfs::{find_dentry, find_parent_dentry, Fd, File, OpenFlags, StatusFlags},
     serial_println,
-    task::proc::curr_proc,
 };
 
 pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
     let file = {
-        let p = curr_proc();
+        let p = my_proc();
         let mut p = p.lock();
         p.fd.get_mut(fd as usize).unwrap().clone()
     };
@@ -30,7 +29,7 @@ pub fn sys_write(fd: Fd, buf: &[u8]) -> usize {
 
 pub fn sys_read(fd: Fd, buf: &mut [u8]) -> usize {
     let file = {
-        let p = curr_proc();
+        let p = my_proc();
         let p = p.lock();
         p.fd.get(fd as usize).unwrap().clone()
     };
@@ -69,7 +68,7 @@ pub fn sys_open(path_addr: usize, flags: OpenFlags) -> Option<Fd> {
         }));
 
         let fd = {
-            let p = curr_proc();
+            let p = my_proc();
             let mut p = p.lock();
 
             let entry = p.fd.vacant_key();
@@ -84,7 +83,7 @@ pub fn sys_open(path_addr: usize, flags: OpenFlags) -> Option<Fd> {
 }
 
 pub fn sys_close(fd: Fd) {
-    let p = curr_proc();
+    let p = my_proc();
     let mut p = p.lock();
     p.fd.remove(fd as usize);
 }

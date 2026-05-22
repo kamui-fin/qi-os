@@ -14,6 +14,7 @@ STACK_OFFSET    equ TRAMPOLINE_DATA + 8
 ENTRY_OFFSET    equ TRAMPOLINE_DATA + 16
 READY_OFFSET    equ TRAMPOLINE_DATA + 24
 APIC_ID_OFFSET    equ TRAMPOLINE_DATA + 32
+CPU_PTR_OFFSET    equ TRAMPOLINE_DATA + 40
 
 trampoline_start:
 
@@ -78,6 +79,7 @@ wait_for_bsp:
 
     mov rax, [ENTRY_OFFSET]
     mov rdi, [APIC_ID_OFFSET]
+    mov rsi, [CPU_PTR_OFFSET]
 
     mov byte [READY_OFFSET], 1
 

@@ -5,6 +5,7 @@
 .extern TSS_POINTER
 
 # fn switch_to_task(
+#       old_thread: *const ThreadControlBlock,
 #       next_thread: *const ThreadControlBlock,
 # );
 #
@@ -24,19 +25,12 @@ switch_to_task:
     push r15
 
     # save old task's rsp
-    mov rax, [rip+CURR_THREAD_PTR]
-    mov [rax+0], rsp
+    mov [rdi+0], rsp
 
-    # point CURR_THREAD_PTR to new task
-    mov [rip+CURR_THREAD_PTR], rdi
-    
     # switch stacks
-    mov rsp, [rdi+0]      
-    mov rbx, [rdi+(1*8)] 
-    mov rax, [rdi+(2*8)]
-
-    mov rdx, [rip+TSS_POINTER]
-    mov [rdx+4], rbx           
+    mov rsp, [rsi+0]      
+    mov rbx, [rsi+(1*8)] 
+    mov rax, [rsi+(2*8)]
 
     mov rcx, cr3              
     cmp rax, rcx             

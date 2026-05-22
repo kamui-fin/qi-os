@@ -20,17 +20,19 @@ use crate::fs::vfs::StatusFlags;
 use crate::interrupts;
 use crate::interrupts::BOOT_RTC;
 use crate::interrupts::ELAPSED;
-use crate::task::proc::curr_proc;
+use crate::lapic::my_proc;
+use crate::lapic::mycpu;
+use crate::spinlock::Spinlock;
 use crate::task::proc::exec;
 use crate::task::proc::fork;
 use crate::task::proc::wait_pid;
 use crate::task::proc::MAX_FD;
-use crate::task::thread::nano_sleep;
-use crate::task::thread::terminate_task;
-use crate::task::thread::yield_sched;
+use crate::task::scheduler::nano_sleep;
+use crate::task::scheduler::terminate_task;
+use crate::task::scheduler::yield_sched;
+use crate::task::scheduler::SCHEDULER;
 use crate::task::thread::BlockReason;
 use crate::task::thread::ThreadState;
-use crate::task::thread::SCHEDULER;
 use crate::UtsName;
 use crate::ALLOC;
 use crate::KERNEL_CONFIG;
@@ -44,12 +46,12 @@ use alloc::vec::Vec;
 use common::UserWindow;
 use core::arch::naked_asm;
 use core::str::FromStr;
+use core::sync::atomic::Ordering;
 use core::{
     ffi::{c_char, CStr},
     ptr,
 };
 use crossbeam_queue::ArrayQueue;
-use crate::spinlock::Spinlock;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::OffsetPageTable;
@@ -62,10 +64,7 @@ use x86_64::VirtAddr;
 // This is the starting virt addr within user proc that we'll map any shm into
 const MMAP_BASE: usize = 0x0000_4000_0000_0000;
 
-use crate::{
-    serial_println,
-    task::{proc::spawn_proc, thread::CURR_THREAD_PTR},
-};
+use crate::{serial_println, task::proc::spawn_proc};
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -340,7 +339,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 .unwrap();
             let dentry = find_dentry(path).unwrap();
 
-            let p = curr_proc();
+            let p = my_proc();
             let mut p = p.lock();
             p.cwd = dentry;
 
@@ -372,7 +371,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Fstat => {
             // arg1: fd (u64)
             // arg2: *mut Stat
-            let p = curr_proc();
+            let p = my_proc();
             let p = p.lock();
             let file = p.fd.get(arg1 as usize).unwrap().lock();
             let stat = file.inode.ops.stat(&file.inode);
@@ -397,7 +396,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         }
         SysCallKind::Dup => {
             // arg1: oldfd u64
-            let p = curr_proc();
+            let p = my_proc();
             let mut p = p.lock();
             let oldfd = p.fd.get(arg1).unwrap();
             let lowest_fd = (0..MAX_FD).find(|i| p.fd.contains(*i)).unwrap();
@@ -408,7 +407,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: oldfd u64
             // arg2: newfd u64
             if arg1 != arg2 {
-                let p = curr_proc();
+                let p = my_proc();
                 let mut p = p.lock();
                 let oldfd = p.fd.get(arg1).unwrap();
                 p.fd[arg2] = oldfd.clone();
@@ -429,7 +428,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
         SysCallKind::Getcwd => {
             // arg1: buffer *u8
             // arg2: len (usize)
-            let p = curr_proc();
+            let p = my_proc();
             let p = p.lock();
             let abs_cwd = full_path(p.cwd.clone());
             let ptr = arg1 as *mut u8;
@@ -442,7 +441,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd u64
             // arg2: offset usize
             // arg3 (for now we won't implement): whence (SEEK_START, SEEK_CUR, SEEK_END) like starting from where
-            let p = curr_proc();
+            let p = my_proc();
             let p = p.lock();
             let mut file = p.fd[arg1].lock();
             let pos = file.pos;
@@ -455,7 +454,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd u64
             // arg2: addr of *mut DEntryMinimal
             // arg3: count usize
-            let p = curr_proc();
+            let p = my_proc();
             let p = p.lock();
             let file = p.fd.get(arg1 as usize).unwrap().lock();
             let entries = file.inode.ops.readdir(&file.inode);
@@ -480,7 +479,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
             // arg1: fd u64
             // arg2: request u64
             // arg3: args void*
-            let p = curr_proc();
+            let p = my_proc();
             let p = p.lock();
             let fd = p.fd.get(arg1).unwrap().lock();
             fd.ops.ioctl(arg2 as u64, arg3 as u64);
@@ -499,7 +498,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 _ => unimplemented!(),
             };
 
-            let p = curr_proc();
+            let p = my_proc();
             let p = p.lock();
             match cmd {
                 FcntlCommand::SetFlags(flags) => {
@@ -518,7 +517,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 writers: 1,
             };
             let inode = Arc::new(INode {
-                inum: PIPE_ID_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+                inum: PIPE_ID_COUNT.fetch_add(1, Ordering::Relaxed),
                 fs: PIPE_FS.clone(),
                 mode: crate::fs::vfs::NodeType::Pipe,
                 data: crate::fs::vfs::INodeData::Pipe(Arc::new(pipe)),
@@ -542,7 +541,7 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
                 ops: Arc::new(PipeOps),
             }));
 
-            let p = curr_proc();
+            let p = my_proc();
             let mut p = p.lock();
             let rfd = p.fd.insert(read_file) as u64;
             let wfd = p.fd.insert(write_file) as u64;
@@ -602,19 +601,17 @@ extern "C" fn syscall_handler(trap_frame: &mut TrapFrame) {
 }
 
 fn sys_get_unix_time() -> usize {
-    let elapsed_sec = ELAPSED
-        .load(core::sync::atomic::Ordering::Relaxed)
-        .div_ceil(1000) as usize;
+    let elapsed_sec = ELAPSED.load(Ordering::Relaxed).div_ceil(1000) as usize;
     let boot_unix = BOOT_RTC.try_get().unwrap().as_unix_timestamp();
     boot_unix + elapsed_sec
 }
 
 fn sys_alloc(arg1: usize) -> usize {
     // arg1: size
-    let curr_proc = curr_proc();
-    let mut curr_proc = curr_proc.lock();
+    let my_proc = my_proc();
+    let mut my_proc = my_proc.lock();
 
-    let old_heap_end = curr_proc.adsp.heap_end;
+    let old_heap_end = my_proc.adsp.heap_end;
     let new_heap_end = old_heap_end + arg1;
 
     let old_mapped_end = old_heap_end.align_up(4096u64);
@@ -624,7 +621,7 @@ fn sys_alloc(arg1: usize) -> usize {
         let start_page = Page::<Size4KiB>::containing_address(old_mapped_end);
         let end_page = Page::<Size4KiB>::containing_address(new_mapped_end - 1u64);
 
-        let mut mapper = curr_proc.adsp.get_page_table(PHYS_MEM_OFFSET);
+        let mut mapper = my_proc.adsp.get_page_table(PHYS_MEM_OFFSET);
         // map pages in-between
         for page in Page::range_inclusive(start_page, end_page) {
             let mut alloc = ALLOC.get().unwrap().lock();
@@ -652,7 +649,7 @@ fn sys_alloc(arg1: usize) -> usize {
         }
     }
 
-    curr_proc.adsp.heap_end = new_heap_end;
+    my_proc.adsp.heap_end = new_heap_end;
     old_heap_end.as_u64() as usize
 }
 
@@ -667,13 +664,13 @@ fn sys_frame_ready() {
 }
 
 fn sys_alloc_back_buffer(arg1: usize) {
-    let curr_proc = curr_proc();
-    let mut curr_proc = curr_proc.lock();
+    let my_proc = my_proc();
+    let mut my_proc = my_proc.lock();
 
     // get the length of LFB and allocate needed frames, zero out, map into userspace
     let screen = SCREEN.get().unwrap().lock();
     // not seeing any prints after here???
-    let mut mapper = curr_proc.adsp.get_page_table(PHYS_MEM_OFFSET);
+    let mut mapper = my_proc.adsp.get_page_table(PHYS_MEM_OFFSET);
     let buffer_num_bytes = screen.bytes_per_line * screen.height;
 
     let num_frames = buffer_num_bytes.div_ceil(4096);
@@ -709,7 +706,7 @@ fn sys_alloc_back_buffer(arg1: usize) {
         mapper_flush.flush();
     }
 
-    curr_proc.adsp.backbuffer_frames = Some(backbuffer_frames);
+    my_proc.adsp.backbuffer_frames = Some(backbuffer_frames);
 
     // Fill in user passed in FrameBufferInfo struct
     let user_window_info = unsafe { &mut *(arg1 as *mut UserWindow) };
@@ -721,7 +718,7 @@ fn sys_alloc_back_buffer(arg1: usize) {
 }
 
 fn sys_get_pid() -> usize {
-    let p = curr_proc();
+    let p = my_proc();
     let p = p.lock();
     p.pid as usize
 }
@@ -732,14 +729,14 @@ fn sys_spawn(arg1: usize, arg2: usize, arg3: usize) {
 }
 
 fn sys_exit(arg1: usize) {
-    let curr_thread_id = unsafe { (*CURR_THREAD_PTR).id };
+    let curr_thread_id = unsafe { (*mycpu().curr_thread.load(Ordering::Relaxed)).id };
     let parent_id = {
         let mut procs = PROC.get().unwrap().lock();
-        let curr_proc_index = procs
+        let my_proc_index = procs
             .iter()
             .position(|p| p.lock().pid == curr_thread_id)
             .unwrap();
-        procs.remove(curr_proc_index).lock().parent
+        procs.remove(my_proc_index).lock().parent
     };
 
     // notify parent
@@ -750,9 +747,8 @@ fn sys_exit(arg1: usize) {
             let parent_proc = &scheduler
                 .threads
                 .iter()
-                .find(|t| t.lock().id == parent_id as u64)
+                .find(|t| t.id == parent_id as u64)
                 .unwrap()
-                .lock()
                 .state;
             serial_println!("{:#?}", parent_proc);
             if let ThreadState::Blocked(BlockReason::WaitThread(child_pid)) = parent_proc {
