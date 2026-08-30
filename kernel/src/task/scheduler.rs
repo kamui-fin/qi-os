@@ -18,6 +18,18 @@ use crate::{
     },
 };
 
+// currently every core takes the same lock on every tick and wake, ping pongs between cores
+
+// threads will build up working cashe and then be swapped
+
+// outline:
+// have a per core run list
+// teh ready queues will be thread safe and lock free
+// use work stealing so that a core with nothing to do will look in other cores
+//      run lists for work to take
+// have each cores scheduler judge how 'full' it is and try to move tasks to other cores
+// mark sleeping threads as runnable AND dead, the scheduler will try to run them eventually and notice
+
 static MAX_TASKS: usize = 15;
 
 #[no_mangle]
@@ -177,7 +189,7 @@ pub fn yield_sched() {
     let mut scheduler = SCHEDULER.lock();
     let cpu = mycpu();
     let curr_thread = unsafe { &mut *cpu.curr_thread.load(Ordering::Relaxed) };
-    if curr_thread.id == 1{
+    if curr_thread.id == 1 {
         return;
     }
 
