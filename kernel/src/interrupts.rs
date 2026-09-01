@@ -155,13 +155,13 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
             if curr_thread.time_slice_remaining <= TIME_BETWEEN_TICKS {
                 curr_thread.time_slice_remaining = TIME_SLICE;
                 curr_thread.state = ThreadState::Ready;
-                scheduler.ready_queue.push_back(curr_thread.id);
+                cpu.ready_queue.lock().push_back(curr_thread.id);
                 cpu.needs_resched.store(true, Ordering::SeqCst);
             } else {
                 curr_thread.time_slice_remaining -= TIME_BETWEEN_TICKS;
             }
         } else {
-            if !scheduler.ready_queue.is_empty() {
+            if !cpu.ready_queue.lock().is_empty() {
                 cpu.needs_resched.store(true, Ordering::SeqCst);
             }
         }

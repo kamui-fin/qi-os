@@ -87,7 +87,7 @@ impl Scheduler {
 
     pub fn pick_next_thread(&mut self) -> Option<*mut ThreadControlBlock> {
         let cpu = mycpu();
-        serial_println!("{:#?}", cpu.ready_queue);
+        //serial_println!("{:#?}", cpu.ready_queue);
         serial_println!(
             "{:#?}",
             self.threads.iter().map(|t| t.id).collect::<Vec<u64>>()

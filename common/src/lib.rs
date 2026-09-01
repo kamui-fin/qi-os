@@ -3,7 +3,7 @@
 use embedded_graphics::{
     Pixel,
     pixelcolor::{Rgb565, raw::ToBytes},
-    prelude::{OriginDimensions, Point, RgbColor, Size},
+    prelude::{OriginDimensions, Point, Size},
 };
 
 // User-land graphics

@@ -10,12 +10,12 @@ use core::ffi::CStr;
 use core::mem;
 use core::ptr::from_ref;
 use core::sync::atomic::AtomicU64;
-
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use alloc::{collections::vec_deque::VecDeque};
 use elf::abi::PT_LOAD;
 use elf::endian::LittleEndian;
 use elf::ElfBytes;
@@ -678,7 +678,9 @@ pub fn fork(tf: &TrapFrame) -> u64 {
 
     let mut scheduler = SCHEDULER.lock();
     scheduler.threads.push(child_tcb);
-    scheduler.ready_queue.push_back(child_pid);
+    drop(scheduler);
+    let cpu = mycpu();
+    cpu.ready_queue.lock().push_back(child_pid);
 
     child_pid
 }
