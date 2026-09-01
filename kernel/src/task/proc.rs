@@ -283,7 +283,7 @@ impl AddressSpace {
             );
         }
 
-        // copy arg raw char data
+        // copy arg raw char datad
         for i in 0..argc {
             let c_string = unsafe { CStr::from_ptr(*c_argv.add(i)) };
             let arglen = c_string.count_bytes() + 1;
@@ -552,8 +552,9 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
     PROC.get().unwrap().lock().push(proc.clone());
 
     let mut scheduler = SCHEDULER.lock();
+    let cpu = mycpu();
     scheduler.threads.push(main_thread);
-    scheduler.ready_queue.push_back(pid);
+    cpu.ready_queue.push_back(pid);
 }
 
 pub fn wait_pid(pid: u64) {

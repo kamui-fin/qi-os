@@ -9,7 +9,7 @@ use x86_64::{
 
 use crate::{
     interrupts::{ELAPSED, TIME_SLICE},
-    lapic::mycpu,
+    lapic::{mycpu, Cpu},
     serial_println,
     spinlock::{Spinlock, SpinlockGuard},
     task::{
@@ -30,7 +30,7 @@ use crate::{
 // have each cores scheduler judge how 'full' it is and try to move tasks to other cores
 // mark sleeping threads as runnable AND dead, the scheduler will try to run them eventually and notice
 
-static MAX_TASKS: usize = 15;
+pub static MAX_TASKS: usize = 15;
 
 #[no_mangle]
 pub extern "C" fn release_scheduler_hook() {
@@ -74,24 +74,25 @@ lazy_static! {
 
 pub struct Scheduler {
     pub threads: Vec<ThreadControlBlock>,
-    pub ready_queue: VecDeque<ThreadId>,
+    //pub ready_queue: VecDeque<ThreadId>,
 }
 
 impl Scheduler {
     pub fn new() -> Self {
         Self {
             threads: Vec::with_capacity(MAX_TASKS),
-            ready_queue: VecDeque::with_capacity(MAX_TASKS),
+            //ready_queue: VecDeque::with_capacity(MAX_TASKS),
         }
     }
 
     pub fn pick_next_thread(&mut self) -> Option<*mut ThreadControlBlock> {
-        serial_println!("{:#?}", self.ready_queue);
+        let cpu = mycpu();
+        serial_println!("{:#?}", cpu.ready_queue);
         serial_println!(
             "{:#?}",
             self.threads.iter().map(|t| t.id).collect::<Vec<u64>>()
         );
-        if let Some(next_id) = self.ready_queue.pop_front() {
+        if let Some(next_id) = cpu.ready_queue.lock().pop_front() {
             let next_thread = self
                 .threads
                 .iter_mut()
@@ -105,21 +106,22 @@ impl Scheduler {
     }
 
     pub fn spawn(&mut self, id: ThreadId, return_addr: *const ()) {
+        let cpu = mycpu();
         let new_thread = ThreadControlBlock::new(id, return_addr, None, None, None);
         self.threads.push(new_thread);
 
         if id > 2 {
-            self.ready_queue.push_back(id);
+            cpu.ready_queue.lock().push_back(id);
         }
     }
 
     pub fn unblock_task(&mut self, id: ThreadId) {
         if let Some(thread) = self.threads.iter_mut().find(|t| t.id == id) {
             if let ThreadState::Blocked(_) = thread.state {
-                thread.state = ThreadState::Ready;
-                self.ready_queue.push_back(id);
-
                 let cpu = mycpu();
+                thread.state = ThreadState::Ready;
+                cpu.ready_queue.lock().push_back(id);
+
                 cpu.needs_resched.store(true, Ordering::SeqCst);
             }
         }
@@ -128,14 +130,11 @@ impl Scheduler {
 
 pub fn scheduler_loop() -> ! {
     let cpu = mycpu();
-
+    // need to enable interrupts first, handle and then enter lock
     loop {
         interrupts::enable();
 
-        let mut scheduler = SCHEDULER.lock();
-
-        if scheduler.ready_queue.is_empty() {
-            drop(scheduler);
+        if cpu.ready_queue.lock().is_empty() {
             hlt();
             continue;
         }
@@ -143,14 +142,18 @@ pub fn scheduler_loop() -> ! {
         cpu.needs_resched.store(false, Ordering::SeqCst);
 
         let curr_thread = unsafe { &mut *cpu.curr_thread.load(Ordering::Relaxed) };
+
         if curr_thread.state == ThreadState::Running && curr_thread.id != 1 {
             curr_thread.state = ThreadState::Ready;
             curr_thread.time_slice_remaining = TIME_SLICE;
-
-            scheduler.ready_queue.push_back(curr_thread.id);
+            cpu.ready_queue.lock().push_back(curr_thread.id);
         }
 
-        let next_thread = scheduler.pick_next_thread().unwrap();
+        let next_thread = {
+            let mut scheduler = SCHEDULER.lock();
+            scheduler.pick_next_thread().unwrap()
+        };
+
         switch_to_task_wrapper(curr_thread, next_thread);
     }
 }
@@ -196,7 +199,8 @@ pub fn yield_sched() {
     curr_thread.state = ThreadState::Ready;
     curr_thread.time_slice_remaining = TIME_SLICE;
 
-    scheduler.ready_queue.push_back(curr_thread.id);
+    cpu.ready_queue.lock().push_back(curr_thread.id);
+    cpu.ready_queue.force_release();
 
     switch_to_scheduler();
 }

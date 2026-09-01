@@ -1,9 +1,9 @@
 use crate::acpi::{find_rsdp, get_rsdt, SdtHeader};
-use crate::driver::pit::{per_core_init};
+use crate::driver::pit::per_core_init;
 use crate::mem::gdt::{init_gdt, new_gdt, new_tss, Selectors};
 use crate::spinlock::Spinlock;
 use crate::task::proc::ProcessControlBlock;
-use crate::task::scheduler::{self, scheduler_loop};
+use crate::task::scheduler::{self, scheduler_loop, MAX_TASKS};
 use crate::task::thread::ThreadControlBlock;
 use crate::{hlt_loop, serial_println, PHYS_MEM_OFFSET};
 use alloc::boxed::Box;
@@ -24,6 +24,7 @@ use x86_64::structures::gdt::GlobalDescriptorTable;
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 
+pub type ThreadId = u64;
 pub struct Cpu {
     pub apic_id: u8,
     pub ready: AtomicBool,
@@ -40,6 +41,7 @@ pub struct Cpu {
     pub irq_disable_depth: AtomicUsize,
     pub int_enabled: AtomicBool,
     pub needs_resched: AtomicBool,
+    pub ready_queue: Spinlock<VecDeque<ThreadId>>, //only needs to have interrupts dissabled but also needs to be atomic, spinlock is easiest
 }
 
 // guarenteed raw pointers are accessed safely
@@ -189,6 +191,7 @@ pub fn setup_cpu(apic_id: u8) -> *mut Cpu {
         irq_disable_depth: AtomicUsize::new(0),
         int_enabled: AtomicBool::new(false),
         needs_resched: AtomicBool::new(false),
+        ready_queue: Spinlock::new(VecDeque::with_capacity(MAX_TASKS)),
     });
     let cpu_raw = Box::into_raw(cpu);
     cpu_raw

@@ -14,7 +14,7 @@ linked_list_allocator = "0.9.0"
 pc-keyboard = "0.7.0"
 uart_16550 = "0.2.0"
 volatile = "0.6.1"
-x86_64 = "0.14.2"
+x86_64 = "0.15"
 log = { version = "0.4.17", default-features = false }
 bitfield-struct = "0.11"
 bitflags = "2.11.0"
