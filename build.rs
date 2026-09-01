@@ -19,7 +19,6 @@ fn main() {
                 .join("bootloader/x86_64-stage-3.json")
                 .to_str()
                 .unwrap(),
-            "-Zjson-target-spec",
             "-Zbuild-std=core",
             "-Zbuild-std-features=compiler-builtins-mem",
             "--profile",

@@ -434,7 +434,6 @@ pub extern "C" fn ap_startup(cpu_id: u64, cpu_addr: u64) -> ! {
 pub fn cpu_common(_cpu_id: u64) -> ! {
     init_kmain();
 
-    CPU.lock().push(_cpu_id as u8);
     unsafe {
         per_core_init();
     }
@@ -468,6 +467,8 @@ pub fn start_other_cpus(entries: Iter<MadtEntryData>, bsp: u8) {
     // mailbox pattern
     let boot_data = unsafe { &mut *((0x8F00 + PHYS_MEM_OFFSET) as *mut TrampolineData) };
 
+    CPU.lock().push(bsp);
+
     for entry in entries {
         match entry {
             MadtEntryData::IoApic(data) => {
@@ -479,6 +480,8 @@ pub fn start_other_cpus(entries: Iter<MadtEntryData>, bsp: u8) {
                 if apic_id == bsp {
                     continue;
                 }
+
+                CPU.lock().push(apic_id);
 
                 let cpu_ptr = setup_cpu(apic_id) as u64;
 

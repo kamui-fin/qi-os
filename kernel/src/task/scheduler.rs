@@ -42,6 +42,8 @@ fn switch_to_task_wrapper(
     old_thread: *const ThreadControlBlock,
     next_thread: *mut ThreadControlBlock,
 ) {
+    // Interrupts MUST be disabled when calling this function
+    assert!(!x86_64::instructions::interrupts::are_enabled());
     let cpu = mycpu();
     cpu.curr_thread.store(next_thread, Ordering::Relaxed);
 
@@ -154,6 +156,7 @@ pub fn scheduler_loop() -> ! {
             scheduler.pick_next_thread().unwrap()
         };
 
+        interrupts::disable();
         switch_to_task_wrapper(curr_thread, next_thread);
     }
 }
@@ -172,8 +175,8 @@ fn switch_to_scheduler() {
     // assert!(mycpu().ncli == 1)
     // assert!(curr_thread.state != RUNNING)
     // assert!(interrupts_enabled == false)
-
     let cpu = mycpu();
+    serial_println!(" CPU {:#?} successfully swapped to scheduler", cpu.apic_id);
     let int_enabled = cpu.int_enabled.load(Ordering::SeqCst);
     let sched_thread = cpu.main_sched_thread.load(Ordering::SeqCst);
 
@@ -183,7 +186,10 @@ fn switch_to_scheduler() {
 }
 
 pub fn switch_if_needed() {
-    if mycpu().needs_resched.load(Ordering::Relaxed) {
+    let needs_resched = x86_64::instructions::interrupts::without_interrupts(|| {
+        mycpu().needs_resched.load(Ordering::Relaxed)
+    });
+    if needs_resched {
         yield_sched()
     }
 }

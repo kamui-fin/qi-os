@@ -554,7 +554,8 @@ pub fn spawn_proc(program: &'static CStr, argv: *const *const core::ffi::c_char,
     let mut scheduler = SCHEDULER.lock();
     let cpu = mycpu();
     scheduler.threads.push(main_thread);
-    cpu.ready_queue.push_back(pid);
+    drop(scheduler);
+    cpu.ready_queue.lock().push_back(pid);
 }
 
 pub fn wait_pid(pid: u64) {
@@ -678,8 +679,8 @@ pub fn fork(tf: &TrapFrame) -> u64 {
 
     let mut scheduler = SCHEDULER.lock();
     scheduler.threads.push(child_tcb);
-    drop(scheduler);
     let cpu = mycpu();
+    
     cpu.ready_queue.lock().push_back(child_pid);
 
     child_pid
