@@ -45,6 +45,7 @@ fn switch_to_task_wrapper(
     // Interrupts MUST be disabled when calling this function
     assert!(!x86_64::instructions::interrupts::are_enabled());
     let cpu = mycpu();
+    serial_println!("cli depth: {:#?}", cpu.irq_disable_depth);
     cpu.curr_thread.store(next_thread, Ordering::Relaxed);
 
     unsafe {
@@ -151,13 +152,11 @@ pub fn scheduler_loop() -> ! {
             cpu.ready_queue.lock().push_back(curr_thread.id);
         }
 
-        let next_thread = {
-            let mut scheduler = SCHEDULER.lock();
-            scheduler.pick_next_thread().unwrap()
-        };
+        let mut scheduler = SCHEDULER.lock();
+        let next_thread = scheduler.pick_next_thread().unwrap();
 
-        interrupts::disable();
         switch_to_task_wrapper(curr_thread, next_thread);
+        drop(scheduler);
     }
 }
 
@@ -176,7 +175,7 @@ fn switch_to_scheduler() {
     // assert!(curr_thread.state != RUNNING)
     // assert!(interrupts_enabled == false)
     let cpu = mycpu();
-    serial_println!(" CPU {:#?} successfully swapped to scheduler", cpu.apic_id);
+    serial_println!(" CPU {:#?} swapped to scheduler", cpu.apic_id);
     let int_enabled = cpu.int_enabled.load(Ordering::SeqCst);
     let sched_thread = cpu.main_sched_thread.load(Ordering::SeqCst);
 
