@@ -1,8 +1,9 @@
 # Roadmap
 
 - SMP (for engine)
-    - LAPIC/IOAPIC/ACPI
-    - multi-core scheduler
+    - ~~LAPIC/IOAPIC/ACPI~~ 
+    - ~~multi-core scheduler~~ (Rough draft is there but still debugging to do, will likely be rewritten)
+    - More efficient scheduler: (work stealing, load balacing ect)
     - multi-core async executor?
 - pci enumeration
 - sound

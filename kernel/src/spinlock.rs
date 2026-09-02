@@ -1,5 +1,5 @@
 // spinlock impl inspired by xv6
-
+use crate::serial_println;
 use core::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
@@ -16,6 +16,8 @@ pub struct Spinlock<T> {
 unsafe impl<T: Send> Sync for Spinlock<T> {}
 
 pub fn pushcli() {
+    //let caller = core::panic::Location::caller();
+    //serial_println!("pushcli from {}", caller);
     let enabled = x86_64::instructions::interrupts::are_enabled();
     x86_64::instructions::interrupts::disable();
     let cpu = mycpu();
@@ -29,6 +31,8 @@ pub fn pushcli() {
 }
 
 pub fn popcli() {
+    //let caller = core::panic::Location::caller();
+    //serial_println!("popcli from {}", caller);
     let cpu = mycpu();
     if cpu.irq_disable_depth.load(Ordering::SeqCst) == 0 {
         panic!("cannot popcli; depth = 0");

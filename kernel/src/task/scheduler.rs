@@ -205,7 +205,6 @@ pub fn yield_sched() {
     curr_thread.time_slice_remaining = TIME_SLICE;
 
     cpu.ready_queue.lock().push_back(curr_thread.id);
-    cpu.ready_queue.force_release();
 
     switch_to_scheduler();
 }
