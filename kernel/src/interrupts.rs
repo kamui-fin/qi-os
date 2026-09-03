@@ -123,39 +123,43 @@ extern "x86-interrupt" fn double_fault_handler(
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
+// We want to use the ticks counter as a rough timer, but we don't know whether all the CPU timers will be synchronized, so we'll only update ticks using the first CPU to avoid those issues.
+
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     mix_entropy();
+    
 
-    if !BOOT_RTC.is_initialized() {
-        BOOT_RTC.init_once(|| get_rtc_time());
-    }
-    // 1 ms passed by
-    let curr_time = ELAPSED.fetch_add(1, Ordering::Relaxed) + 1;
-    let curr_time_ns = curr_time * 1_000_000;
-
-    {
-        let mut scheduler = SCHEDULER.lock();
-        let mut to_wake = [0u64; 15];
-        let mut count = 0;
-        for thread in scheduler.threads.iter() {
-            if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
-                if expire_time <= curr_time_ns {
-                    to_wake[count] = thread.id;
-                    count += 1;
+    let cpu = mycpu();
+    if cpu.apic_id == 0 {
+        if !BOOT_RTC.is_initialized() {
+            BOOT_RTC.init_once(|| get_rtc_time());
+        }
+        // 1 ms passed byf
+        let curr_time = ELAPSED.fetch_add(1, Ordering::Relaxed) + 1;
+        let curr_time_ns = curr_time * 1_000_000;
+        {
+            let mut scheduler = SCHEDULER.lock();
+            let mut to_wake = [0u64; 15];
+            let mut count = 0;
+            for thread in scheduler.threads.iter() {
+                if let ThreadState::Blocked(BlockReason::Sleep(expire_time)) = thread.state {
+                    if expire_time <= curr_time_ns {
+                        to_wake[count] = thread.id;
+                        count += 1;
                 }
             }
         }
         for i in 0..count {
             scheduler.unblock_task(to_wake[i]);
         }
+    }
 
-        let cpu = mycpu();
-        let curr_thread = unsafe { &mut *(cpu.curr_thread.load(Ordering::SeqCst)) };
-        if curr_thread.id != 1 {
-            if curr_thread.time_slice_remaining <= TIME_BETWEEN_TICKS {
-                curr_thread.time_slice_remaining = TIME_SLICE;
-                curr_thread.state = ThreadState::Ready;
-                cpu.ready_queue.lock().push_back(curr_thread.id);
+    let curr_thread = unsafe { &mut *(cpu.curr_thread.load(Ordering::SeqCst)) };
+    if curr_thread.id != 1 {
+        if curr_thread.time_slice_remaining <= TIME_BETWEEN_TICKS {
+            curr_thread.time_slice_remaining = TIME_SLICE;
+            curr_thread.state = ThreadState::Ready;
+            cpu.ready_queue.lock().push_back(curr_thread.id);
                 cpu.needs_resched.store(true, Ordering::SeqCst);
             } else {
                 curr_thread.time_slice_remaining -= TIME_BETWEEN_TICKS;
