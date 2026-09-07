@@ -134,6 +134,7 @@ impl Scheduler {
 pub fn scheduler_loop() -> ! {
     let cpu = mycpu();
     // need to enable interrupts first, handle and then enter lock
+
     loop {
         interrupts::enable();
 

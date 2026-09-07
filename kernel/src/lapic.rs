@@ -27,6 +27,7 @@ use x86_64::VirtAddr;
 
 pub type ThreadId = u64;
 pub struct Cpu {
+    pub cpuid: u8,
     pub apic_id: u8,
     pub ready: AtomicBool,
 
@@ -54,6 +55,9 @@ pub struct CpuRef(pub *mut Cpu);
 
 unsafe impl Send for CpuRef {}
 unsafe impl Sync for CpuRef {}
+
+//use let ptr = addr as *mut Cpu; couldn't use *mut Cpu since Spinlock requires Send
+pub CPUS: AtomicPtr<Cpu>;
 
 pub fn mycpu() -> &'static Cpu {
     if x86_64::instructions::interrupts::are_enabled() {
@@ -175,12 +179,13 @@ pub fn get_lapic() -> Lapic {
     Lapic::new(prologue.local_apic_addr as u64)
 }
 
-pub fn setup_cpu(apic_id: u8) -> *mut Cpu {
+pub fn setup_cpu(apic_id: u8, ncpu: u8) -> *mut Cpu {
     let tss_boxed = Box::new(new_tss());
     let tss_ptr = Box::into_raw(tss_boxed);
 
     let (gdt, selectors) = unsafe { new_gdt(&*tss_ptr) };
     let cpu = Box::new(Cpu {
+        cpuid: ncpu,
         apic_id: apic_id as u8,
         ready: AtomicBool::new(false),
         tss: tss_ptr,
@@ -195,6 +200,7 @@ pub fn setup_cpu(apic_id: u8) -> *mut Cpu {
         ready_queue: Spinlock::new(VecDeque::with_capacity(MAX_TASKS)),
     });
     let cpu_raw = Box::into_raw(cpu);
+    CPUS[ncpu] = cpu;
     cpu_raw
 }
 
@@ -457,6 +463,8 @@ fn init_kmain() {
 
 pub fn start_other_cpus(entries: Iter<MadtEntryData>, bsp: u8) {
     // copy ap_init.asm into 0x8000
+    let mut ncpu: u8 = 1; // will call in main with bsp being 0 and increment as APs are loaded 
+
     unsafe {
         load_trampoline();
     }
@@ -484,7 +492,7 @@ pub fn start_other_cpus(entries: Iter<MadtEntryData>, bsp: u8) {
                 CPU.lock().push(apic_id);
 
                 let cpu_ptr = setup_cpu(apic_id) as u64;
-
+                ncpu += 1;
                 let proc_stack_top = allocate_stack_for_core(apic_id as usize);
                 boot_data.cr3 = cr3;
                 boot_data.stack_top = proc_stack_top;

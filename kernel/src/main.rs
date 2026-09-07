@@ -82,7 +82,7 @@ pub extern "C" fn _start(boot_info: *mut RawBootInfo) -> ! {
     LAPIC.init_once(|| lapic);
 
     let bsp = init_lapic();
-    let cpu_raw = setup_cpu(bsp);
+    let cpu_raw = setup_cpu(bsp, 0);
     GsBase::write(VirtAddr::new(cpu_raw as u64));
 
     init_gdt(&mycpu().gdt, &mycpu().selectors);
